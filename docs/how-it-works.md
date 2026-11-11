@@ -19,14 +19,16 @@ Each object has its own memory: the frame it was prompted on, its last 6 frames,
 and a short summary vector (an "object pointer") from each of its last 15
 frames. Objects never read each other's memory.
 
-The predictor that ships with these models is built for a finished video file:
+The predictor in EdgeTAM's repository, which this project calls stock, is built
+for a finished video file:
 
 - One video per predictor. Many cameras mean many copies of the model, each in
   its own process.
 - Every frame is loaded before tracking starts and every frame's outputs are
   kept, so memory grows with the length of the video.
 - Every object has to be named before tracking starts. Adding one later raises
-  "Cannot add new object id after tracking starts".
+  "Cannot add new object id after tracking starts". (Meta's separate SAM 2
+  repository lifted this in December 2024.)
 - About a dozen times per frame, the CPU stops and waits for the GPU.
 
 ## Continuous batching
@@ -187,6 +189,18 @@ its memory holds 8 times as many tokens per frame, memory attention dominates,
 and the GPU is already the limit at one camera, so batching cameras cannot raise
 its frame rate ([results.md](results.md#sam-21)).
 
+## Where the model code comes from
+
+EdgeTAM is not published as a package, so on first use tamserve downloads its
+code from GitHub at a pinned commit and checks it against a pinned SHA-256
+digest before importing anything. It applies a two-line fix (upstream crashes
+as soon as a second object is tracked) and keeps the result, with the weights,
+in `~/.cache/tamserve`; `TAMSERVE_CACHE` moves that folder. SAM 2.1 weights come
+from Meta's servers and are checked against pinned digests too; they are 149 to
+856 MB. tamserve will not import code from a cache folder that another user owns
+or that anyone can write to. The code is stored under the package name
+`tamserve_sam2`, so it can share a process with Meta's own `sam2` package.
+
 ## How it was checked
 
 - **Against stock, bit for bit.** One camera through the engine against the
@@ -208,8 +222,10 @@ its frame rate ([results.md](results.md#sam-21)).
 - A new prompt for a followed object restarts it. Stock's refinement clicks,
   which adjust the current mask and keep the old memory, and prompts spread over
   several frames are not supported.
-- The engine follows what it is told to follow. It does not find objects, and an
-  object that leaves and comes back is a new object unless you prompt it again.
-- One GPU, one process, one thread: call `step()` from one place.
-- Numbers are from one RTX 4090. The thresholds for CUDA graphs and encoder
-  pieces were tuned there.
+- The engine follows what it is told to follow. It does not find objects, and if
+  one leaves the view its mask comes back empty until the model picks it up
+  again, if it does.
+- One engine drives one GPU and is called from one thread.
+- The timings are from one RTX 4090. The two tuning choices made from them, CUDA
+  graphs for calls of one or two rows and encoder pieces of 4, are safe on any
+  GPU but may not be the fastest choice on another.

@@ -10,7 +10,7 @@ card, which repeats the README's benchmark table, is typed in.
 |---|---|
 | Camera wall | Nine clips played as nine cameras with 15 objects between them, through one compiled engine: 208 frames/s in total, 23 per camera, 43 ms per step, 1.0 GB of GPU memory for the engine. The wall plays at the speed it was processed, which is a little slower than the 30 frames/s footage. |
 | The same masks | One 300-frame clip with three objects, through the stock predictor and through tamserve with `exact=True`. Of 829 million mask pixels, 0 differ. Stock holds 3.75 to 4.0 GB of GPU memory, because it loads the whole clip first; tamserve holds 0.17 GB. |
-| Objects come and go | One camera. A forklift is followed from the first frame; a second is added on frame 80, when it has driven into view; the first is dropped on frame 230. The stock predictor raises `Cannot add new object id ... after tracking starts` at the second step. |
+| Objects come and go | One camera. A forklift is followed from the first frame; a second is added on frame 80, when it has driven into view; the first is dropped on frame 230. EdgeTAM's own predictor raises `Cannot add new object id ... after tracking starts` at the second step. |
 | Benchmark card | The like-for-like table from the [README](../README.md#results), measured separately. |
 
 ## How it was recorded

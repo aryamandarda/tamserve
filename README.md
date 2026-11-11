@@ -2,108 +2,172 @@
 
 # tamserve
 
-**Continuous batching for SAM 2-family video trackers.**
+**Live, multi-camera tracking with SAM 2, on a single GPU.**
 
-One copy of EdgeTAM or SAM 2.1 on one GPU follows objects on many live cameras at once:<br>
-the same masks as Meta's predictor, more frames per second than its fastest setup, a quarter of the GPU memory.
+SAM 2 and its smaller sibling EdgeTAM can track anything you point at, but their code was written for one recorded video at a time.<br>
+tamserve is the serving engine they are missing: one copy of the model tracks every object on every camera, for as long as the cameras run.
 
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch 2.6+](https://img.shields.io/badge/PyTorch-2.6%2B-EE4C2C?logo=pytorch&logoColor=white)
 ![Models](https://img.shields.io/badge/models-EdgeTAM%20%C2%B7%20SAM%202.1-6f42c1)
-![Speed](https://img.shields.io/badge/speed-up%20to%201.24x%20compiled%20stock-2ea44f)
+![Speed](https://img.shields.io/badge/speed-11%25%20to%2024%25%20faster%20than%20the%20original-2ea44f)
+![Memory](https://img.shields.io/badge/GPU%20memory-4x%20less%20at%208%20cameras-2ea44f)
 ![Accuracy](https://img.shields.io/badge/accuracy-unchanged%20on%20DAVIS%202017-2ea44f)
 ![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue)
 
-[Demo](#demo) · [At a glance](#at-a-glance) · [What it is for](#what-it-is-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Results](#results) · [Caveats](#caveats)
+[Why tamserve](#why-tamserve) · [New to video tracking?](#new-to-video-tracking) · [Using it](#using-it) · [How it works](#how-it-works) · [Results](#results) · [Limits](#limits)
 
 <a href="docs/media/tamserve-demo.mp4"><img src="docs/media/camera-wall.gif" width="880" alt="Nine cameras and fifteen objects followed by one tamserve engine on one GPU, with its recorded frames per second"></a>
 
-<sub>Nine cameras, fifteen objects, one model, one RTX 4090: 208 frames per second, as recorded. <a href="docs/media/tamserve-demo.mp4">Watch the 37-second demo.</a></sub>
+<sub>Nine cameras tracked by one model on one GPU. <a href="docs/media/tamserve-demo.mp4">Watch the 37-second demo</a>, or read <a href="docs/demo.md">how it was recorded</a>.</sub>
 
 </div>
 
-## At a glance
+## Why tamserve
 
-EdgeTAM on one RTX 4090, both sides compiled, counted the same way. "Stock" is the predictor that ships with the model, run as fast as it goes: one process per camera, sharing the GPU.
+The models are excellent. The code that comes with them was made for editing one recorded video, and the usual way to put it on several cameras is to run a separate copy of the model for each one. Memory piles up with every copy and with every minute of video.
 
-| | stock predictor | tamserve |
+tamserve does what LLM servers such as vLLM do for chat: every camera shares one copy of the model, and whatever needs the GPU at a given moment goes through it together. That turns out to be faster as well as lighter, and because the model itself is not touched, the results are the same.
+
+| | the model's own code | tamserve |
 |---|---|---|
-| 1 camera | 177 frames/s | **219 frames/s** |
-| 8 cameras | 280 frames/s, 8.6 GB GPU, 21 GB RAM | **323 frames/s, 2.2 GB GPU, 3.2 GB RAM** |
-| 64 cameras | does not fit (1.1 GB of GPU memory per process) | **321 frames/s, 5.7 GB GPU** |
-| an 800-frame video | 9.8 GB of GPU memory, 12 MB for every frame | **0.28 GB, whatever the length** |
-| a new object mid-video | error | **any frame, any camera** |
-| accuracy on DAVIS 2017 | 0.8686 | **0.8685** |
+| Several cameras | one copy of the model per camera | one copy for all of them |
+| GPU memory, 8 cameras | 8.6 GB | 2.2 GB |
+| Speed, 1 camera | 177 frames/s | 219 frames/s |
+| Speed, 8 cameras | 280 frames/s | 323 frames/s |
+| 64 cameras | would need about 70 GB of GPU memory | 321 frames/s in 5.7 GB |
+| GPU memory for an 800-frame video | 9.8 GB | 0.28 GB, however long it runs |
+| Starting to track something new mid-stream | not possible | on any frame |
+| Accuracy on DAVIS 2017 | 0.8686 | 0.8685 |
 
-No retraining and no changed weights: tamserve runs the published models' own code, and with `exact=True` one camera's masks are bit-for-bit identical to stock's.
+These are for EdgeTAM on one RTX 4090, against EdgeTAM's own code at its fastest: compiled, one copy per camera, all sharing the GPU. Speeds are totals across the cameras, with one object each. [Results](#results) has the full tables.
 
-## Demo
+## New to video tracking?
 
-**[Watch the 37-second demo](docs/media/tamserve-demo.mp4).** Three runs recorded on one RTX 4090 with EdgeTAM. Every mask, speed and memory figure on screen is read from the recording.
+Say you have video, and you need to know where one particular thing is in every frame: this person, that forklift, the dog. That is tracking. SAM 2 and its smaller relatives, EdgeTAM and SAM 2.1, are models from Meta that do it very well. You point at the thing once, on a single frame, and the model draws its exact outline on every frame after that.
 
-| scene | what was recorded |
+tamserve sits between one of those models and your program. Your program hands it the latest frame from each camera and gets back the outline of every tracked object in each one. You can start tracking something new, or stop, at any moment, and cameras can come and go.
+
+It is meant for anyone who has to answer "where exactly is this thing, right now, in each of my video feeds": sports and broadcast graphics, warehouse and retail analytics, robotics, wildlife and lab monitoring, annotation tools.
+
+One thing it does not do is decide what to track. A person clicking on the picture, or a detector, has to say where the thing is to begin with. tamserve takes over from there.
+
+Four words come up a lot below:
+
+| word | what it means here |
 |---|---|
-| Camera wall | Nine stock clips played as nine cameras, 15 objects between them, one compiled engine: 208 frames/s in total, 23 per camera, 1.0 GB of GPU memory. Shown at the speed it was processed. |
-| The same masks | One 300-frame clip with three objects, through stock and through tamserve: 0 of 829 million mask pixels differ. Stock holds 3.9 GB of GPU memory for the clip, tamserve 0.17 GB. |
-| Objects come and go | A second forklift is added on the frame it drives into view and the first is dropped later. Stock raises `Cannot add new object id ... after tracking starts`. |
+| frame | one image from a video |
+| mask | the answer for one object in one frame: a grid of True and False the size of the frame, True on every pixel that belongs to the object |
+| prompt | how you point at the thing you want tracked: a box around it, a click on it, or a rough mask of it |
+| stock | the model's own code: the tracker in Meta's EdgeTAM repository, used exactly as it comes |
 
-How it was recorded, and the footage sources: [docs/demo.md](docs/demo.md).
+## Using it
 
-## What it is for
-
-**The model.** SAM 2, and its smaller relatives EdgeTAM and SAM 2.1, can follow an object through a video once you point at it. You give one hint on one frame (a box around the thing, a click on it, or a rough outline) and the model returns the object's exact outline, its *mask*, on every frame after that. It works on anything you can point at: a person, a car, a dog, a part on a conveyor.
-
-**The problem.** The code these models ship with is built for editing a finished video file. It handles one video at a time, loads the whole video before it starts, needs every object named up front, and uses more memory the longer the video is. None of that fits a camera that never stops, let alone twenty of them.
-
-**What tamserve does.** It is a serving engine: the layer between the model and an application that has live video. You hand it the newest frame from each camera, and it returns every tracked object's mask on each. Objects can be added or dropped at any moment, cameras come and go, and it runs indefinitely in fixed memory. Underneath, it packs every object on every camera into one batch per frame, the same idea that lets one GPU serve many chat conversations at once, so one model does the work that would otherwise take a process per camera.
-
-**Who would use it.** Anyone turning live video into "where is this thing, exactly, in every frame": sports and broadcast graphics, retail and warehouse analytics, robotics, wildlife and lab monitoring, video annotation tools. If you already use SAM 2 on recorded clips and want it on streams, this is the missing piece.
-
-**What it is not.** It does not decide what to track. Something else, a person clicking or a detector, supplies the first box, click or mask. tamserve follows from there.
-
-## Quick start
+### Install
 
 ```bash
-git clone https://github.com/aryamandarda/tamserve.git && cd tamserve
-pip install -e .
+pip install git+https://github.com/aryamandarda/tamserve.git
 ```
 
-Python 3.10 or later. An NVIDIA GPU for the speeds here; it also runs on a CPU, slowly. The model code and weights download themselves on first use.
+You need Python 3.10 or newer and an NVIDIA GPU. It does run on a CPU, which is handy for trying it out but much too slow for live video.
+
+The first time you load a model, tamserve downloads it into `~/.cache/tamserve`, so that run needs an internet connection. EdgeTAM is 54 MB. The download is pinned to one version and verified before any of it is loaded.
+
+### A live loop
+
+tamserve does not open cameras, and it does not run a loop of its own. Your program reads frames however it likes and calls `engine.step()` once per round. This example uses OpenCV to read two network cameras:
 
 ```python
-from tamserve import Box, Clicks, Engine, build_video_predictor, prepare
+import cv2  # pip install opencv-python; any source of frames will do
+from tamserve import Box, Engine, build_video_predictor, prepare
 
-engine = Engine(build_video_predictor("cuda"), compile=True)  # EdgeTAM, compiled: slow to start, fastest to run
+engine = Engine(build_video_predictor("cuda"))  # loads EdgeTAM onto the GPU
+cameras = {"door": cv2.VideoCapture("rtsp://door-camera/stream"),
+           "yard": cv2.VideoCapture("rtsp://yard-camera/stream")}
 
-def frames():  # the newest frame from each camera that has one; grab() is yours and returns a PIL image
-    return {cam: prepare(grab(cam), device="cuda") for cam in ("door", "yard")}
+# What to track and where it is in the first frame: a box as (left, top, right, bottom), in pixels.
+# In a real system this comes from a detector, or from someone drawing on the picture.
+start = {"door": {"courier": Box(410, 120, 560, 480)}}
 
-# Start following something: a box, clicks or a mask, in the frame's own pixels.
-masks = engine.step(frames(), {"door": {"courier": Box(410, 120, 560, 480)}})
+while True:
+    # 1. Take the latest frame from each camera.
+    frames = {}
+    for name, camera in cameras.items():
+        ok, picture = camera.read()
+        if ok:
+            frames[name] = prepare(cv2.cvtColor(picture, cv2.COLOR_BGR2RGB), device="cuda")
 
-# Then, frame after frame: every followed object's mask, at the frame's own size.
-masks = engine.step(frames())  # {"door": {"courier": <bool tensor, H x W>}, "yard": {}}
+    # 2. One call tracks every object in every one of those frames.
+    masks = engine.step(frames, start)
+    start = None  # the box was only needed once; from here on the engine tracks the courier by itself
 
-# Objects join and leave at any time, without disturbing the others.
-masks = engine.step(frames(), {"yard": {"dog": Clicks([(300, 420)])}})
-engine.drop("door", "courier")  # engine.drop("door") stops the whole camera
+    # 3. Use the answer. masks["door"]["courier"] is True on the courier's pixels and False everywhere else.
+    for camera_name, objects in masks.items():
+        for object_name, mask in objects.items():
+            print(camera_name, object_name, "covers", int(mask.sum()), "pixels")
 ```
 
-Camera and object ids are whatever you choose. Cameras need not share a resolution or a frame rate: pass whichever have a new frame.
+Each call to `step()` takes one frame per camera and returns when the masks for those frames are ready. The engine remembers what it is tracking between calls, which is why the box is passed only once. Camera names and object names are yours to choose.
 
-| want | do |
+How fast can the loop go? On an RTX 4090 the compiled engine needs about 25 ms per round for eight cameras with one object each, so 40 rounds a second. Reading and resizing the frames takes time on top of that. If your loop falls behind the cameras, read the newest frame and let the older ones go. The engine tracks from whatever frame it is given and does not need to see every one.
+
+### Pointing at things
+
+To start tracking something, you give it a name and point at it in the current frame. There are three ways to point. All of them use the frame's own pixel coordinates, with x counted from the left edge and y from the top.
+
+| prompt | what it is |
 |---|---|
-| another model | `build_video_predictor("cuda", "sam2.1-tiny")`, also `-small`, `-base-plus`, `-large` |
-| the fastest engine | `Engine(predictor, compile=True)`: about 20 minutes to be ready the first time on a machine, about 95 seconds after that, and no stalls once running |
-| a quicker start | `compile="default"`: ready in under 3 minutes the first time; 3 to 8% slower from 4 cameras up, 20% slower at two, half the speed at one |
-| no start-up wait at all | leave `compile` off: 55 frames/s at one camera, 190 to 210 from 4 cameras up |
-| masks kept on the GPU | `Engine(predictor, gpu_masks=True)` |
-| a prompt chosen after seeing a frame's masks | `engine.add(frames, seeds)`: starts objects on the frame just processed without advancing the others |
-| to correct an object | prompt it again under the same id: it starts over from the new prompt |
-| bit-identical masks to stock | `Engine(predictor, exact=True)` |
-| frames resized on the GPU | `prepare(image, device="cuda", resize_on_device=True)`, or `prepare_batch` for many |
+| `Box(left, top, right, bottom)` | A rectangle around the thing. This is the most reliable, and it is what a detector gives you. |
+| `Clicks([(x, y), ...])` | One or more points on the thing, as from a mouse. A second list of 1s and 0s can mark each point as on the thing (1) or deliberately off it (0). |
+| a mask | A True/False array the size of the frame, if you already have the outline from somewhere else. |
 
-A prompt is a `Box(x0, y0, x1, y1)`, `Clicks([(x, y), ...], labels)` with label 1 on the object and 0 off it, or a boolean mask the size of the frame.
+### The four things you can do
+
+**Start tracking something.** Pass its name and where it is, together with the frame it is in. You do this once. Everything already being tracked carries on undisturbed.
+
+```python
+engine.step(frames, {"yard": {"dog": Box(300, 380, 420, 470)}})
+```
+
+**Stop tracking something.**
+
+```python
+engine.drop("door", "courier")  # just the courier
+engine.drop("door")             # everything on the door camera
+```
+
+**Fix a track that has gone wrong.** Now and then an outline drifts. It slides onto the wrong person, or keeps only half of the object. Point at the object again under the same name, exactly as you did to start it. Tracking begins afresh from the new box, and the old, mistaken history is thrown away.
+
+```python
+engine.step(frames, {"door": {"courier": Box(455, 130, 600, 500)}})  # same name, new box
+```
+
+**Start something you noticed in the frame you just processed.** `step()` moves every tracked object forward by one frame. Suppose a detector looked at the frame you just passed in and found a dog. Calling `step()` again with that same frame would move everything else forward twice. `add()` starts the dog on that frame and leaves the rest alone.
+
+```python
+engine.add(frames, {"yard": {"dog": Box(300, 380, 420, 470)}})  # frames: the ones you just gave step()
+```
+
+### Options
+
+| if you want | do this |
+|---|---|
+| a different model | `build_video_predictor("cuda", "sam2.1-tiny")`. The same works with `-small`, `-base-plus` and `-large`. |
+| masks left on the GPU instead of copied to the CPU | `Engine(predictor, gpu_masks=True)` |
+| frames resized on the GPU, to save CPU time | `prepare(image, device="cuda", resize_on_device=True)`, or `prepare_batch` for several at once |
+| masks identical to stock's, bit for bit | `Engine(predictor, exact=True)` |
+
+### Compiling for speed
+
+`Engine(predictor, compile=True)` compiles the model for your GPU. Every speed figure on this page uses it, and the price is a slow first start.
+
+| `compile=` | first start on a machine | later starts | speed |
+|---|---|---|---|
+| `True` | about 20 minutes | about 95 seconds | the fastest |
+| `"default"` | under 3 minutes | about a minute | 3 to 8% slower from 4 cameras up, 20% slower at two, half the speed at one |
+| left off | 2 seconds | 2 seconds | 55 frames/s at one camera, about 200 from four up |
+
+Later starts are quick because PyTorch keeps the compiled code on disk. By default it keeps it in `/tmp`, so point `TORCHINDUCTOR_CACHE_DIR` at a folder that survives a reboot. Compiling has only been tested on Linux.
 
 ## How it works
 
@@ -120,7 +184,7 @@ flowchart LR
     F --> M
 ```
 
-Five things make that fast. None of them changes what the model computes: only floating-point rounding can differ, and for one camera, uncompiled, not even that.
+Five things make that fast. None of them changes what the model computes; at most they change floating-point rounding.
 
 **1. Every object is a row in one batch.** This is continuous batching, as LLM servers do it: there, every conversation that needs its next token shares one pass; here, every object that has a new frame does. Objects never read each other's memory, so the arithmetic is the same as tracking them separately. Rows whose memories are still filling are grouped by size; sixteen frames after the last object joins, everything is one group.
 
@@ -145,7 +209,9 @@ The full account, including what was tried and dropped: [docs/how-it-works.md](d
 
 ## Results
 
-One machine throughout: an RTX 4090 (24 GB), an AMD EPYC 9354 limited to 8.8 cores, PyTorch 2.15 with CUDA 13.2, bf16 precision. Speed uses synthetic 640x360 frames (cost depends on tensor shapes, not on what the pixels show), one object per camera, every object's memory full. Accuracy uses DAVIS 2017.
+The machine is an RTX 4090 (24 GB) with an AMD EPYC 9354 limited to 8.8 cores, PyTorch 2.15, CUDA 13.2, bf16 precision.
+
+Speed is measured with synthetic 640x360 frames that are already decoded and sitting on the GPU, one object per camera, once every object's memory is full. The cost of a step depends on tensor shapes, not on what the pixels show, so synthetic frames give the same timings as real ones. The figures are the engine's own; decoding and resizing your video comes on top. Accuracy is measured on DAVIS 2017.
 
 ### Speed against stock's fastest setup
 
@@ -161,9 +227,7 @@ Stock is compiled the way Meta's `vos_optimized` mode compiles SAM 2 and runs on
 | 32 | | **319** | | | 3.3 / 3.2 GB |
 | 64 | | **321** | | | 5.7 / 3.2 GB |
 
-Frames per second are summed over cameras. Stock's GPU figure leaves out the 0.75 GB of video each of its processes holds. Sixteen stock processes did not start on this host. The engine copies every mask to the CPU here while stock leaves its on the GPU; with `gpu_masks=True` and steps queued without waiting, the engine reaches 255, 320, 354 and 343 frames/s at 1, 2, 4 and 8 cameras.
-
-Without compiling, the engine does 55 frames/s at one camera and about 200 from four up, against 57 for uncompiled stock on its one camera.
+Frames per second are summed over cameras. Stock's GPU figure leaves out the 0.75 GB of video each of its processes holds. Past 8 cameras stock was not measured: 16 processes failed to start on the test machine, and 32 or more would not fit in 24 GB.
 
 ### Accuracy
 
@@ -177,7 +241,7 @@ All 30 DAVIS 2017 validation videos run as cameras that join three frames apart,
 | SAM 2.1 base+ | 0.8893 | 0.8893 | | 0 |
 | SAM 2.1 large | 0.8919 | 0.8918 | | 0 |
 
-For scale, stock's own accuracy moves by 0.0002 when the only change is whether an object is tracked alone or next to others: a GPU rounds slightly differently at different batch sizes. With `exact=True`, one camera through the engine matches stock bit for bit, on the CPU and the GPU, for both model families and all three prompt kinds.
+For scale, stock's own accuracy moves by 0.0002 when the only change is whether an object is tracked alone or next to others, because a GPU rounds slightly differently at different batch sizes. Compiling has the same kind of effect: two builds of the compiled EdgeTAM engine scored 0.8685 and 0.8689. Uncompiled runs repeat exactly, and with `exact=True` one camera matches stock bit for bit, on the CPU and the GPU, for both model families and all three kinds of prompt.
 
 ### Memory
 
@@ -186,48 +250,38 @@ For scale, stock's own accuracy moves by 0.0002 when the only change is whether 
 | one object, 200 frames | 2.7 GB | 0.28 GB |
 | one object, 400 frames | 5.1 GB | 0.28 GB |
 | one object, 800 frames | 9.8 GB | 0.28 GB |
-| 8 cameras, GPU | 8.6 GB | 2.2 GB |
-| 8 cameras, host | 21.1 GB | 3.2 GB |
 
-Stock can keep its video and outputs in host memory instead of on the GPU; then it is host memory that grows, to 9.5 GB at 800 frames.
+That is GPU memory against the length of the video. Stock can keep its video and outputs in host memory instead; then it is host memory that grows, to 9.5 GB at 800 frames. Memory against the number of cameras is in the speed table above.
 
 ### SAM 2.1
 
+EdgeTAM's repository also runs the SAM 2.1 models, and that is how they were measured here, for both stock and tamserve. Meta's separate SAM 2 repository has a newer tracker with its own compiled mode, which was not part of this comparison.
+
 SAM 2.1 keeps 8 times as many memory tokens per frame as EdgeTAM, so memory attention keeps the GPU busy even with one camera and batching cannot raise its frame rate much. Compiled SAM 2.1 tiny runs at 83 to 87 frames/s from 1 to 32 cameras, against 77, 85 and 83 for 1, 4 and 8 compiled stock processes. What the engine adds there is the live interface, fixed memory, and one process instead of many: 3.4 GB of GPU memory at 8 cameras against 10.7 GB.
 
-### Where a step goes
+More tables, a breakdown of where the time goes, and the command behind every number: [docs/results.md](docs/results.md).
 
-Compiled EdgeTAM, milliseconds per camera per step:
+## Limits
 
-| cameras | whole step | image encoder | memory attention | mask decoder | memory encoder | GPU idle |
-|---|---|---|---|---|---|---|
-| 1 | 4.5 | 2.6 | 1.7 | 1.2 | 0.7 | 14% |
-| 8 | 2.9 | 1.5 | 1.0 | 0.3 | 0.3 | 3% |
-| 64 | 3.0 | 1.4 | 1.0 | 0.3 | 0.3 | 3% |
+What tamserve does not do:
 
-Stages are timed one at a time, so at one camera they add up to more than the step, where they overlap. From 8 cameras the GPU is busy nearly all the time and the image encoder is half the cost, which is where further gains would have to come from.
+- **Track backwards.** It only moves forward in time, which is all a live camera needs. Stock can also run backwards from a prompt in a recorded clip.
+- **Adjust a mask without restarting it.** Fixing a track means pointing at the object again, and tracking starts over from there. Stock also lets you add a click that nudges the current mask while keeping its history, and lets you prompt one object on several frames. tamserve has neither.
+- **Find or recognise objects.** Something else has to supply the first prompt. If an object leaves the view, its mask comes back empty, and whether it is picked up again when it returns is up to the model.
+- **Use more than one GPU.** One engine drives one GPU and must be called from one thread. For more GPUs, run an engine on each and split the cameras between them.
 
-Every table, more of them, and the command behind each: [docs/results.md](docs/results.md).
+What to expect in practice:
 
-## Caveats
-
-- **Forward only.** Stock can also track backwards through a stored video.
-- **A new prompt restarts an object.** Stock's refinement clicks, which adjust the current mask and keep the old memory, are not supported, nor are prompts spread over several frames.
-- **It follows; it does not find.** An object that leaves the frame and returns is a new object unless you prompt it again.
-- **One GPU, one process, one thread.** Call `step()` from one place.
-- **The first compiled start is slow.** About 20 minutes on a machine with empty PyTorch caches, about 95 seconds after that. `compile="default"` takes under 3 minutes.
-- **Compiled results vary in the last digit** from one build to the next (0.8685 and 0.8689 for EdgeTAM on two builds; stock is 0.8686). Uncompiled results repeat exactly.
-- **One machine.** Everything here is from one RTX 4090. The thresholds for CUDA graphs and encoder pieces were tuned on it, and one or two cameras depend on how fast the host's CPU is.
-- **Synthetic frames for speed, a benchmark for accuracy.** It has not yet been run on live camera feeds.
-- **Stock beyond 8 processes is unmeasured.** Sixteen did not start on the test host, so the comparison stops where stock does.
-- **Hole filling is off on both sides.** The models' optional step that fills tiny holes in masks needs a CUDA extension that neither side builds here.
-- **The model code is downloaded and run.** It is fetched at a pinned commit and checked against a pinned digest before anything is imported, and the cache is refused if another user owns it or everyone can write to it. Treat `~/.cache/tamserve` like any folder of installed code.
+- **More objects cost more.** The speeds on this page are for one object per camera. Each extra object adds about 2.4 ms to a round. In the demo, nine cameras with 15 objects ran at 208 frames/s, which is 23 per camera.
+- **The first compiled start takes about 20 minutes.** After that it is about 95 seconds, as long as PyTorch's cache of compiled code is still there. A new machine or a fresh container starts from scratch. `compile="default"` is ready in under 3 minutes.
+- **Other GPUs will give other numbers.** Nothing in tamserve is tied to the RTX 4090. It runs on any NVIDIA GPU that PyTorch supports, compiling included, because the compile step tunes itself to whatever card it starts on. You will get the same masks. You will not get the same speeds, since every figure here comes from one 4090, and with one or two cameras the frame rate also depends on how fast the CPU is. The lead over stock comes from work the engine skips, so it should carry over, but it has only been measured on this one card.
 
 ## Reproducing the numbers
 
 ```bash
+git clone https://github.com/aryamandarda/tamserve.git && cd tamserve
 uv sync --group dev --group bench
-uv run pytest                                   # 22 tests on a CPU, 28 with a GPU
+uv run pytest                                   # 23 tests on a CPU, 29 with a GPU
 scripts/fetch_davis.sh                          # DAVIS 2017, 833 MB, for the accuracy benchmark
 
 uv run python bench/throughput.py --arms procs-compiled --procs 1,2,4,8                    # stock
@@ -255,8 +309,6 @@ The stock arm needs NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark 
 | [How it works](docs/how-it-works.md) | the model, continuous batching, each speed change and why it is exact, limits |
 | [Results](docs/results.md) | every measurement with its command, start-up times, the per-stage profile, what was tried and dropped |
 | [The demo video](docs/demo.md) | what each scene shows, how it was recorded, footage sources |
-
-EdgeTAM is not published as a package, so on first use tamserve downloads its code at a pinned commit, applies a two-line fix (upstream crashes on a second object), and caches it with the checkpoints in `~/.cache/tamserve` (`TAMSERVE_CACHE` moves it). It is stored as a package named `tamserve_sam2`, so tamserve can share a process with Meta's own `sam2` package.
 
 ## Credits and licence
 

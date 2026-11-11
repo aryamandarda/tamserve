@@ -6,12 +6,18 @@ one machine: an RTX 4090 (24 GB), an AMD EPYC 9354 limited to 8.8 cores, PyTorch
 on a GPU), EdgeTAM at commit `7711e01`. How the engine works is in
 [how-it-works.md](how-it-works.md).
 
-"Stock" is the predictor that ships with the model. "Compiled" stock is its
+"Stock" is the tracker in Meta's EdgeTAM repository, used as it comes: Meta's SAM 2
+video predictor as it stood in late 2024, which also runs the SAM 2.1 models.
+Meta's separate SAM 2 repository has since changed its predictor (it can add
+objects mid-video and has its own compiled mode); that newer code was not
+measured. "Compiled" stock is its
 modules compiled the way Meta's `vos_optimized` mode compiles SAM 2 (EdgeTAM's
 repository ships no compiled mode), in `torch.compile`'s `max-autotune` mode,
 with the one compiler fix the engine also uses (see
 [Compiling](how-it-works.md#compiling)); without that fix compiled stock ran at
-126 frames/s instead of 186.
+126 frames/s instead of 186. The models' optional step that fills pinhole gaps in
+masks needs a CUDA extension built at install time; it is not built here, so
+neither stock nor tamserve applies it.
 
 ## Throughput
 
@@ -183,8 +189,8 @@ of that model's -0.0004.
 
 `pytest` (`tests/test_engine.py`): with `Engine(exact=True)` one camera gives
 masks identical to stock's on every frame, on the CPU and the GPU, for EdgeTAM
-and SAM 2.1 tiny, for mask, box and click prompts. 28 tests pass on the GPU
-machine, 22 without a GPU.
+and SAM 2.1 tiny, for mask, box and click prompts. 28 tests passed on the GPU
+machine; 23 run without a GPU.
 
 ## Memory
 

@@ -262,6 +262,13 @@ def test_a_refilled_frame_buffer_is_encoded_again(pred, tmp_path):
     assert torch.equal(a.step({"cam": (buf, size)})["cam"][1], b.step({"cam": frames[1]})["cam"][1])
 
 
+def test_prepare_takes_arrays():
+    # What OpenCV and video decoders hand over, once in RGB order.
+    frame = np.random.default_rng(0).integers(0, 256, (48, 80, 3), dtype=np.uint8)
+    (a, size), (b, size_b) = prepare(frame), prepare(Image.fromarray(frame))
+    assert size == size_b == (48, 80) and torch.equal(a, b)
+
+
 def test_resize_on_device_matches_stock(tmp_path):
     rng = np.random.default_rng(0)
     for h, w in [(1080, 1920), (480, 640)]:

@@ -60,10 +60,14 @@ class Clicks(NamedTuple):
 def prepare(image, size: int = 1024, device=None, *, resize_on_device: bool = False):
     """A frame resized exactly as stock load_video_frames resizes it, kept as
     uint8, optionally uploaded to `device` so the step does not pay for it.
+    `image` is a PIL image, an H x W x 3 uint8 RGB array (what video decoders
+    give; OpenCV's are BGR and need converting), or the path of an image file.
     resize_on_device uploads the full frame and resizes it there instead, far less
     CPU work: as PIL does, bicubic, width then height, rounding in between, so
     pixels match stock's or differ by 1.
     Returns (3 x size x size tensor, (height, width))."""
+    if isinstance(image, np.ndarray):
+        image = Image.fromarray(image)
     if not isinstance(image, Image.Image):
         with Image.open(image) as f:
             return prepare(f.convert("RGB"), size, device, resize_on_device=resize_on_device)

@@ -14,7 +14,11 @@ the same masks as Meta's predictor, more frames per second than its fastest setu
 ![Accuracy](https://img.shields.io/badge/accuracy-unchanged%20on%20DAVIS%202017-2ea44f)
 ![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue)
 
-[At a glance](#at-a-glance) · [What it is for](#what-it-is-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Results](#results) · [Caveats](#caveats)
+[Demo](#demo) · [At a glance](#at-a-glance) · [What it is for](#what-it-is-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Results](#results) · [Caveats](#caveats)
+
+<a href="docs/media/tamserve-demo.mp4"><img src="docs/media/camera-wall.gif" width="880" alt="Nine cameras and fifteen objects followed by one tamserve engine on one GPU, with its recorded frames per second"></a>
+
+<sub>Nine cameras, fifteen objects, one model, one RTX 4090: 208 frames per second, as recorded. <a href="docs/media/tamserve-demo.mp4">Watch the 37-second demo.</a></sub>
 
 </div>
 
@@ -27,17 +31,29 @@ EdgeTAM on one RTX 4090, both sides compiled, counted the same way. "Stock" is t
 | 1 camera | 177 frames/s | **219 frames/s** |
 | 8 cameras | 280 frames/s, 8.6 GB GPU, 21 GB RAM | **323 frames/s, 2.2 GB GPU, 3.2 GB RAM** |
 | 64 cameras | does not fit (1.1 GB of GPU memory per process) | **321 frames/s, 5.7 GB GPU** |
-| an 800-frame video | 9.8 GB of GPU memory, still growing | **0.28 GB, flat** |
+| an 800-frame video | 9.8 GB of GPU memory, 12 MB for every frame | **0.28 GB, whatever the length** |
 | a new object mid-video | error | **any frame, any camera** |
 | accuracy on DAVIS 2017 | 0.8686 | **0.8685** |
 
 No retraining and no changed weights: tamserve runs the published models' own code, and with `exact=True` one camera's masks are bit-for-bit identical to stock's.
 
+## Demo
+
+**[Watch the 37-second demo](docs/media/tamserve-demo.mp4).** Three runs recorded on one RTX 4090 with EdgeTAM. Every mask, speed and memory figure on screen is read from the recording.
+
+| scene | what was recorded |
+|---|---|
+| Camera wall | Nine stock clips played as nine cameras, 15 objects between them, one compiled engine: 208 frames/s in total, 23 per camera, 1.0 GB of GPU memory. Shown at the speed it was processed. |
+| The same masks | One 300-frame clip with three objects, through stock and through tamserve: 0 of 829 million mask pixels differ. Stock holds 3.9 GB of GPU memory for the clip, tamserve 0.17 GB. |
+| Objects come and go | A second forklift is added on the frame it drives into view and the first is dropped later. Stock raises `Cannot add new object id ... after tracking starts`. |
+
+How it was recorded, and the footage sources: [docs/demo.md](docs/demo.md).
+
 ## What it is for
 
 **The model.** SAM 2, and its smaller relatives EdgeTAM and SAM 2.1, can follow an object through a video once you point at it. You give one hint on one frame (a box around the thing, a click on it, or a rough outline) and the model returns the object's exact outline, its *mask*, on every frame after that. It works on anything you can point at: a person, a car, a dog, a part on a conveyor.
 
-**The problem.** The code these models ship with is built for editing a finished video file. It handles one video at a time, loads the whole video before it starts, needs every object named up front, and uses more memory with every frame it processes. None of that fits a camera that never stops, let alone twenty of them.
+**The problem.** The code these models ship with is built for editing a finished video file. It handles one video at a time, loads the whole video before it starts, needs every object named up front, and uses more memory the longer the video is. None of that fits a camera that never stops, let alone twenty of them.
 
 **What tamserve does.** It is a serving engine: the layer between the model and an application that has live video. You hand it the newest frame from each camera, and it returns every tracked object's mask on each. Objects can be added or dropped at any moment, cameras come and go, and it runs indefinitely in fixed memory. Underneath, it packs every object on every camera into one batch per frame, the same idea that lets one GPU serve many chat conversations at once, so one model does the work that would otherwise take a process per camera.
 
@@ -108,7 +124,7 @@ Five things make that fast. None of them changes what the model computes: only f
 
 **1. Every object is a row in one batch.** This is continuous batching, as LLM servers do it: there, every conversation that needs its next token shares one pass; here, every object that has a new frame does. Objects never read each other's memory, so the arithmetic is the same as tracking them separately. Rows whose memories are still filling are grouped by size; sixteen frames after the last object joins, everything is one group.
 
-**2. An object keeps only the memory the model reads.** That is the frame it was prompted on, its last 6 frames and a short summary of its last 15. Stock keeps every frame and every output, 12 MB per frame. The engine's memory does not depend on how long a camera has run.
+**2. An object keeps only the memory the model reads.** That is the frame it was prompted on, its last 6 frames and a short summary of its last 15. Stock loads every frame of the video and keeps every output, 12 MB per frame. The engine's memory does not depend on how long a camera has run.
 
 **3. The CPU never waits inside a step.** A GPU works through a queue the CPU fills, and some operations make the CPU stop until the queue is empty. Stock's prompt encoder does this ten times per frame, with masked writes it performs even when there is no prompt. The engine computes that "no prompt" result once and reuses it, and sends its own small index lists from pinned memory. Twelve waits per step became one, the copy of the finished masks, and `gpu_masks=True` removes that.
 
@@ -238,6 +254,7 @@ The stock arm needs NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark 
 |---|---|
 | [How it works](docs/how-it-works.md) | the model, continuous batching, each speed change and why it is exact, limits |
 | [Results](docs/results.md) | every measurement with its command, start-up times, the per-stage profile, what was tried and dropped |
+| [The demo video](docs/demo.md) | what each scene shows, how it was recorded, footage sources |
 
 EdgeTAM is not published as a package, so on first use tamserve downloads its code at a pinned commit, applies a two-line fix (upstream crashes on a second object), and caches it with the checkpoints in `~/.cache/tamserve` (`TAMSERVE_CACHE` moves it). It is stored as a package named `tamserve_sam2`, so tamserve can share a process with Meta's own `sam2` package.
 
@@ -245,4 +262,4 @@ EdgeTAM is not published as a package, so on first use tamserve downloads its co
 
 Created by [**Aryaman Darda**](https://github.com/aryamandarda).
 
-tamserve is Apache-2.0. It runs [EdgeTAM](https://github.com/facebookresearch/EdgeTAM) and [SAM 2.1](https://github.com/facebookresearch/sam2) by Meta, both Apache-2.0, which it downloads and does not redistribute. Accuracy is measured on [DAVIS 2017](https://davischallenge.org/), which is for research use; check its licence before using it for anything else.
+tamserve is Apache-2.0. It runs [EdgeTAM](https://github.com/facebookresearch/EdgeTAM) and [SAM 2.1](https://github.com/facebookresearch/sam2) by Meta, both Apache-2.0, which it downloads and does not redistribute. Accuracy is measured on [DAVIS 2017](https://davischallenge.org/), which is for research use; check its licence before using it for anything else. The demo's footage is from [Pexels](https://www.pexels.com), under the Pexels licence; sources are listed in [docs/demo.md](docs/demo.md).

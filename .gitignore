@@ -3,6 +3,7 @@ data
 results
 *.mp4
 *.mov
+!docs/media/*.mp4
 
 .venv
 __pycache__/

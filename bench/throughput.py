@@ -18,6 +18,10 @@ pixels), one object per camera, every memory full, one GPU:
 Prints frames per second, GPU memory, host memory and time to ready per arm.
 Stock leaves its masks on the GPU; --gpu-masks has the engine do the same.
 Compilation changes rounding; accuracy is measured by bench/accuracy.py.
+--stock sam2 runs the stock arms on Meta's current sam2 package instead of the
+tracker in EdgeTAM's repository (SAM 2.1 models only; see bench/meta_sam2.py),
+compiled the same way; --stock sam2-vos compiles it with its own vos_optimized
+mode instead.
 """
 import argparse
 import json
@@ -35,6 +39,7 @@ import psutil
 import torch
 from PIL import Image
 
+import meta_sam2
 from tamserve.models import build_video_predictor
 from tamserve.engine import Engine, prepare
 from tamserve.reference import clock, precision
@@ -71,17 +76,19 @@ def _clone(x):
     return x
 
 
-def compile_edgetam(pred, mode, warm_dir):
-    """SAM2's vos_optimized compilation applied to EdgeTAM, plus EdgeTAM's spatial
-    perceiver. Outputs are cloned because CUDA-graph modes reuse output buffers.
-    One uncompiled pass first fills EdgeTAM's cached position encodings; filled
+def compile_stock(pred, mode, warm_dir):
+    """SAM2's vos_optimized compilation applied to a stock predictor, plus EdgeTAM's
+    spatial perceiver. Outputs are cloned because CUDA-graph modes reuse output
+    buffers. One uncompiled pass first fills the cached position encodings; filled
     inside a CUDA graph, a later replay would overwrite them."""
-    from tamserve_sam2.modeling.sam import transformer
+    transformer = sys.modules[type(pred.sam_mask_decoder.transformer).__module__]
 
     frame_ms(pred, warm_dir)
-    # As the engine does: stock's kernel-pinning context manager cuts its attention
-    # modules into many graphs; its own fallback switch lets each compile whole.
-    transformer.ALLOW_ALL_KERNELS = True
+    # As the engine does: where stock pins its attention kernel through a context
+    # manager, that cuts its attention modules into many graphs; its own fallback
+    # switch lets each compile whole.
+    if hasattr(transformer, "ALLOW_ALL_KERNELS"):
+        transformer.ALLOW_ALL_KERNELS = True
     torch._dynamo.config.cache_size_limit = 64
 
     def wrap(fn, dynamic):
@@ -90,11 +97,23 @@ def compile_edgetam(pred, mode, warm_dir):
 
     pred.image_encoder.forward = wrap(pred.image_encoder.forward, False)
     pred.memory_encoder.forward = wrap(pred.memory_encoder.forward, False)
-    if pred.spatial_perceiver is not None:  # EdgeTAM only
+    if getattr(pred, "spatial_perceiver", None) is not None:  # EdgeTAM only
         pred.spatial_perceiver.forward = wrap(pred.spatial_perceiver.forward, False)
     pred.memory_attention.forward = wrap(pred.memory_attention.forward, True)  # memory length varies
     pred.sam_prompt_encoder.forward = wrap(pred.sam_prompt_encoder.forward, False)
     pred.sam_mask_decoder.forward = wrap(pred.sam_mask_decoder.forward, False)
+
+
+def stock(model, which, mode, warm_dir):
+    """The stock predictor, compiled when `mode` is set: the tracker in EdgeTAM's
+    repository, or the one in Meta's current sam2 package, compiled the same way
+    ("sam2") or by its own vos_optimized mode ("sam2-vos")."""
+    if which == "sam2-vos":
+        return meta_sam2.build(model, compiled=bool(mode))
+    pred = meta_sam2.build(model) if which == "sam2" else build_video_predictor("cuda", model)
+    if mode:
+        compile_stock(pred, mode, warm_dir)
+    return pred
 
 
 def synthetic_video(d, frames):
@@ -153,14 +172,13 @@ def _wait_for_go(sync, i, skip, window):
     return lo, lo + window
 
 
-def worker(d, sync, i, skip, window, model, mode):
+def worker(d, sync, i, skip, window, model, mode, which):
     """One stock process: track a synthetic video held on the GPU, in a loop. Reports
     the frames it tracked with a full memory inside the window all workers share,
     and the time those took. Compiled first when `mode` is set."""
     t = time.time()
-    pred = build_video_predictor("cuda", model)
+    pred = stock(model, which, mode, d)
     if mode:
-        compile_edgetam(pred, mode, d)
         frame_ms(pred, d)  # compiles
     seed = torch.zeros(H, W, dtype=torch.bool)
     seed[40:80, 60:120] = True
@@ -208,7 +226,7 @@ def engine_worker(sync, i, skip, window, model, mode, n, gpu_masks):
                       "host_gb": round(psutil.Process().memory_info().rss / 2**30, 2)}), flush=True)
 
 
-def procs(n, d, mps, model, mode=None, window=20, skip=10, patience=3600, cameras=0, gpu_masks=False):
+def procs(n, d, mps, model, mode=None, window=20, skip=10, patience=3600, cameras=0, gpu_masks=False, which="edgetam"):
     if mps:
         ok = subprocess.run(["nvidia-cuda-mps-control", "-d"], capture_output=True).returncode == 0
         if not ok:
@@ -216,7 +234,7 @@ def procs(n, d, mps, model, mode=None, window=20, skip=10, patience=3600, camera
     try:
         with tempfile.TemporaryDirectory() as sync:
             cmd = [sys.executable, __file__, "--worker", d, "--sync", sync, "--skip", str(skip), "--window", str(window),
-                   "--model", model, "--mode", mode or "", "--engine-cameras", str(cameras)]
+                   "--model", model, "--mode", mode or "", "--engine-cameras", str(cameras), "--stock", which]
             cmd += ["--gpu-masks"] if gpu_masks else []
             ps = [subprocess.Popen(cmd + ["--index", str(i)], stdout=subprocess.PIPE,
                                    stderr=open(Path(sync, f"err.{i}"), "w"), text=True) for i in range(n)]
@@ -255,6 +273,9 @@ def main():
     ap.add_argument("--sizes", default="4,8,12,16,32,64")
     ap.add_argument("--procs", default="4,8,16")
     ap.add_argument("--mode", default="max-autotune", help="torch.compile mode for stock")
+    ap.add_argument("--stock", default="edgetam", choices=["edgetam", "sam2", "sam2-vos"],
+                    help="whose tracker the stock arms run: EdgeTAM's repository's, or Meta's current sam2 package "
+                         "compiled the same way (sam2) or by its own vos_optimized mode (sam2-vos)")
     ap.add_argument("--engine-mode", default="best",
                     help="for engine-compiled and engine-procs: 'best' for Engine(compile=True), a torch.compile "
                          "mode, or 'off'")
@@ -271,7 +292,7 @@ def main():
         return engine_worker(args.sync, args.index, args.skip, args.window, args.model, args.mode,
                              args.engine_cameras, args.gpu_masks)
     if args.worker:
-        return worker(args.worker, args.sync, args.index, args.skip, args.window, args.model, args.mode)
+        return worker(args.worker, args.sync, args.index, args.skip, args.window, args.model, args.mode, args.stock)
 
     arms = args.arms.split(",")
     sizes = [int(s) for s in args.sizes.split(",")]
@@ -283,7 +304,8 @@ def main():
         if not set(arms) <= {"procs", "procs-compiled", "engine-procs"}:  # those arms' parent stays off the GPU
             frames = [(f.cuda(), size) for f, size in frames]
         if "stock-eager" in arms:
-            print(json.dumps({"model": args.model, "arm": "stock-eager", **one_camera(build_video_predictor("cuda", args.model), d48)}), flush=True)
+            print(json.dumps({"model": args.model, "arm": "stock-eager", "stock": args.stock,
+                              **one_camera(stock(args.model, args.stock, None, d48), d48)}), flush=True)
         if "engine-eager" in arms:
             engine = Engine(build_video_predictor("cuda", args.model), gpu_masks=args.gpu_masks)
             for n in sizes:
@@ -303,8 +325,8 @@ def main():
             if arm in arms:
                 for mps in ((False, True) if mode is None else (True,)):
                     for n in (int(p) for p in args.procs.split(",")):
-                        print(json.dumps({"model": args.model, "arm": arm, "mode": mode,
-                                          **procs(n, dlong, mps, args.model, mode)}), flush=True)
+                        print(json.dumps({"model": args.model, "arm": arm, "mode": mode, "stock": args.stock,
+                                          **procs(n, dlong, mps, args.model, mode, which=args.stock)}), flush=True)
         if "engine-procs" in arms:
             for n in (int(p) for p in args.procs.split(",")):
                 for k in sizes:
@@ -313,9 +335,9 @@ def main():
                                       **procs(n, dlong, n > 1, args.model, args.engine_mode, cameras=k,
                                               gpu_masks=args.gpu_masks)}), flush=True)
         if "stock-compiled" in arms:
-            pred = build_video_predictor("cuda", args.model)
-            compile_edgetam(pred, args.mode, d48)
-            print(json.dumps({"model": args.model, "arm": "stock-compiled", "mode": args.mode, **one_camera(pred, d48)}), flush=True)
+            pred = stock(args.model, args.stock, args.mode, d48)
+            print(json.dumps({"model": args.model, "arm": "stock-compiled", "mode": args.mode, "stock": args.stock,
+                              **one_camera(pred, d48)}), flush=True)
 
 
 if __name__ == "__main__":

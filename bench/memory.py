@@ -14,6 +14,7 @@ import psutil
 import torch
 from PIL import Image
 
+import meta_sam2
 from tamserve.engine import Engine, prepare
 from tamserve.models import build_video_predictor
 from tamserve.reference import precision
@@ -26,6 +27,8 @@ rss = lambda: psutil.Process().memory_info().rss
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="edgetam")
+    ap.add_argument("--stock", default="edgetam", choices=["edgetam", "sam2"],
+                    help="whose tracker stock is: EdgeTAM's repository's, or Meta's current sam2 package")
     ap.add_argument("--frames", default="200,400,800")
     args = ap.parse_args()
     rng = np.random.default_rng(0)
@@ -34,14 +37,14 @@ def main():
     seed[40:80, 60:120] = True
 
     for n in (int(f) for f in args.frames.split(",")):
-        row = {"model": args.model, "frames": n}
+        row = {"model": args.model, "stock": args.stock, "frames": n}
         with tempfile.TemporaryDirectory() as d:
             for i in range(n):
                 pool[i % 8].save(f"{d}/{i}.jpg")
             # Stock as it comes, then with its video and its outputs kept in host memory instead.
             for name, kw in (("stock", {}), ("stock_offloaded", {"offload_video_to_cpu": True,
                                                                  "offload_state_to_cpu": True})):
-                pred = build_video_predictor("cuda", args.model)
+                pred = meta_sam2.build(args.model) if args.stock == "sam2" else build_video_predictor("cuda", args.model)
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats()
                 base_gpu, base_host = torch.cuda.memory_allocated(), rss()

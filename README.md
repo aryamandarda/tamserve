@@ -40,7 +40,7 @@ tamserve does what LLM servers such as vLLM do for chat: every camera shares one
 | Starting to track something new mid-stream | not possible | on any frame |
 | Accuracy on DAVIS 2017 | 0.8686 | 0.8685 |
 
-These are for EdgeTAM on one RTX 4090, against EdgeTAM's own code at its fastest: compiled, one copy per camera, all sharing the GPU. Speeds are totals across the cameras, with one object each. [Results](#results) has the full tables.
+These are for EdgeTAM on one RTX 4090, against EdgeTAM's own code at its fastest: compiled, one copy per camera, all sharing the GPU. Speeds are totals across the cameras, with one object each. With the larger SAM 2.1 models, tamserve runs at the same speed as Meta's current SAM 2 code and uses about a third of the GPU memory. [Results](#results) has the full tables.
 
 ## New to video tracking?
 
@@ -255,9 +255,20 @@ That is GPU memory against the length of the video. Stock can keep its video and
 
 ### SAM 2.1
 
-EdgeTAM's repository also runs the SAM 2.1 models, and that is how they were measured here, for both stock and tamserve. Meta's separate SAM 2 repository has a newer tracker with its own compiled mode, which was not part of this comparison.
+tamserve runs the four SAM 2.1 models too. For these the code to beat is Meta's current SAM 2 package (`sam2` 1.1.0), which is newer than the tracker in EdgeTAM's repository. It can start tracking a new object partway through a video, and it has a compiled mode of its own. It still works on one recorded video, loaded in full before tracking starts.
 
-SAM 2.1 keeps 8 times as many memory tokens per frame as EdgeTAM, so memory attention keeps the GPU busy even with one camera and batching cannot raise its frame rate much. Compiled SAM 2.1 tiny runs at 83 to 87 frames/s from 1 to 32 cameras, against 77, 85 and 83 for 1, 4 and 8 compiled stock processes. What the engine adds there is the live interface, fixed memory, and one process instead of many: 3.4 GB of GPU memory at 8 cameras against 10.7 GB.
+SAM 2.1 keeps 8 times as many memory tokens per frame as EdgeTAM, so the GPU is busy even with a single camera, and sharing one model cannot raise the frame rate much. Speed comes out level. Memory does not:
+
+| SAM 2.1 tiny, both compiled | Meta's current code | tamserve |
+|---|---|---|
+| Speed, 1 camera | 91 frames/s | 88 frames/s |
+| Speed, 8 cameras | 89 frames/s | 91 frames/s |
+| GPU memory, 8 cameras | 10.0 GB | 3.4 GB |
+| 32 cameras | would need about 40 GB of GPU memory | 91 frames/s in 6.6 GB |
+| GPU memory for an 800-frame video | 10.2 GB | 0.32 GB, however long it runs |
+| Accuracy on DAVIS 2017 | 0.8809 | 0.8807 |
+
+The other three sizes agree with Meta's code just as closely: 0.8850, 0.8894 and 0.8919 for Meta's, against 0.8846, 0.8893 and 0.8918.
 
 More tables, a breakdown of where the time goes, and the command behind every number: [docs/results.md](docs/results.md).
 
@@ -289,9 +300,13 @@ uv run python bench/throughput.py --arms engine-procs --procs 1 --sizes 1,2,4,8,
 uv run python bench/accuracy.py --compile best     # add --model sam2.1-tiny and so on
 uv run python bench/memory.py
 uv run python bench/engine_profile.py --stages
+
+uv pip install sam2                                # Meta's current SAM 2 code, for the SAM 2.1 comparison
+uv run python bench/throughput.py --model sam2.1-tiny --stock sam2 --arms procs-compiled --procs 1,2,4,8
+uv run python bench/accuracy.py --model sam2.1-tiny --stock sam2
 ```
 
-The stock arm needs NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark starts and stops itself.
+The stock arms need NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark starts and stops itself. `--stock sam2-vos` uses the compiled mode that ships with Meta's code, which needs PyTorch 2.5.1; `--stock sam2` compiles Meta's code the way the other stock is compiled and runs on current PyTorch.
 
 ## Project layout
 

@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 import davis
+import meta_sam2
 from tamserve.compare import compare
 from tamserve.models import build_video_predictor
 from tamserve.engine import Engine, prepare
@@ -31,6 +32,8 @@ def main():
     ap.add_argument("--stagger", type=int, default=3, help="steps between camera starts")
     ap.add_argument("--fp32", action="store_true", help="the logic check: everything in fp32")
     ap.add_argument("--model", default="edgetam")
+    ap.add_argument("--stock", default="edgetam", choices=["edgetam", "sam2"],
+                    help="whose tracker is the reference: EdgeTAM's repository's, or Meta's current sam2 package")
     ap.add_argument("--compile", default="off",
                     help="'best' for Engine(compile=True), a torch.compile mode, or 'off' (the stock reference "
                          "stays uncompiled)")
@@ -39,7 +42,9 @@ def main():
 
     root = Path(args.davis)
     bf16 = not args.fp32
-    pred = build_video_predictor("cuda" if torch.cuda.is_available() else "cpu", args.model)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    pred = build_video_predictor(device, args.model)
+    ref = meta_sam2.build(args.model, device) if args.stock == "sam2" else pred
     seqs = davis.names(root, args.split)
     seeds = {s: davis.seeds(root, s) for s in seqs}
     paths = {s: sorted(davis.frames_dir(root, s).glob("*.jpg")) for s in seqs}
@@ -48,7 +53,7 @@ def main():
     serial_s, refs = 0.0, {}
     for s in seqs:
         st = {}
-        refs[s] = track(pred, str(davis.frames_dir(root, s)), seeds[s], bf16=bf16, stats=st)
+        refs[s] = track(ref, str(davis.frames_dir(root, s)), seeds[s], bf16=bf16, stats=st)
         serial_s += st["propagate_s"]
 
     engine = Engine(pred, bf16=bf16, compile={"off": False, "best": True}.get(args.compile, args.compile))
@@ -86,6 +91,7 @@ def main():
     print(json.dumps({
         "precision": "fp32" if args.fp32 else "bf16",
         "model": args.model,
+        "stock": args.stock,
         "compile": args.compile,
         "cameras": len(rows),
         "steps": steps,

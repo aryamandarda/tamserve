@@ -9,8 +9,9 @@ on a GPU), EdgeTAM at commit `7711e01`. How the engine works is in
 "Stock" is the tracker in Meta's EdgeTAM repository, used as it comes: Meta's SAM 2
 video predictor as it stood in late 2024, which also runs the SAM 2.1 models.
 Meta's separate SAM 2 repository has since changed its predictor (it can add
-objects mid-video and has its own compiled mode); that newer code was not
-measured. "Compiled" stock is its
+objects mid-video and has its own compiled mode); SAM 2.1 is measured against
+that newer code too, in [its own section](#against-metas-current-sam-2-code).
+"Compiled" stock is its
 modules compiled the way Meta's `vos_optimized` mode compiles SAM 2 (EdgeTAM's
 repository ships no compiled mode), in `torch.compile`'s `max-autotune` mode,
 with the one compiler fix the engine also uses (see
@@ -245,6 +246,76 @@ At 8 cameras a step costs 10.8 ms per camera: memory attention 5.9, image
 encoder 4.3, mask decoder 0.5, memory encoder 0.2. The compiled engine took 918
 seconds to be ready the first time and about 75 after that. The larger SAM 2.1
 models were measured for accuracy only.
+
+### Against Meta's current SAM 2 code
+
+The tracker in EdgeTAM's repository is a late-2024 copy of Meta's. Meta's own
+SAM 2 repository has moved on since: its tracker follows each object
+independently, can add an object after tracking has started, and has a compiled
+mode (`vos_optimized`). So SAM 2.1 was measured again against that code, the
+`sam2` package at version 1.1.0, installed next to tamserve with
+`uv pip install sam2` and selected in the benchmarks with `--stock`.
+
+Everything in this section comes from one session on a second machine: an RTX
+4090 with an AMD EPYC 9684X, PyTorch 2.15 with CUDA 13.2. SAM 2.1 tiny, one
+object per camera, counted as in [Throughput](#throughput).
+
+Meta's compiled mode does not run on PyTorch 2.15. It stops with "accessing
+tensor output of CUDAGraphs that has been overwritten by a subsequent run". It
+was therefore measured two ways: as it comes, in an environment with PyTorch
+2.5.1 (the oldest its repository supports), and on PyTorch 2.15 with its
+modules compiled by the recipe used for the other stock.
+
+One process per camera sharing the GPU through NVIDIA MPS for the three stock
+columns, one process for tamserve, all compiled:
+
+| cameras | Meta's code, its own compiled mode (PyTorch 2.5.1) | Meta's code, compiled as the other stock is | EdgeTAM repository's tracker | tamserve |
+|---|---|---|---|---|
+| 1 | 91 | 88 | 78 | 88 |
+| 2 | 93 | 90 | 91 | 89 |
+| 4 | 92 | 89 | 90 | 92 |
+| 8 | 89 | 86 | 87 | 91 |
+| 16 | | | | 91 |
+| 32 | | | | 91 |
+
+Frames per second, summed over cameras. One camera in one process, median
+frame: Meta's code 75 uncompiled, 94 in its own compiled mode and 91 compiled
+as the other stock is; the EdgeTAM repository's tracker 56 and 78; tamserve
+uncompiled 71, 73, 75 and 73 at 1, 2, 4 and 8 cameras.
+
+| cameras | Meta's code, GPU / host memory | tamserve, GPU / host memory |
+|---|---|---|
+| 1 | 1.3 / 1.5 GB | 1.8 / 4.3 GB |
+| 2 | 2.5 / 3.0 GB | 1.6 / 4.3 GB |
+| 4 | 5.0 / 6.0 GB | 2.4 / 4.3 GB |
+| 8 | 10.0 / 12.0 GB | 3.4 / 4.3 GB |
+| 16 | | 6.0 / 4.3 GB |
+| 32 | | 6.6 / 4.3 GB |
+
+Meta's figures are for its own compiled mode and leave out the 0.75 GB of video
+each process holds on the GPU. On PyTorch 2.15 the same processes took 21.0 GB
+of host memory at 8 cameras.
+
+Against video length (`bench/memory.py --model sam2.1-tiny --stock sam2`): Meta's
+code holds 2.7 GB of GPU memory after 200 frames and 10.2 GB after 800, or 0.27
+GB on the GPU and 9.8 GB on the host when told to keep its video and outputs
+there. tamserve holds 0.32 GB.
+
+Accuracy on DAVIS 2017, as in [The engine against stock](#the-engine-against-stock)
+but with Meta's current code as the reference (`bench/accuracy.py --stock sam2`):
+
+| model | Meta's code | tamserve | lost / extra |
+|---|---|---|---|
+| SAM 2.1 tiny | 0.8809 | 0.8807 | 0 / 0 |
+| SAM 2.1 tiny, `compile=True` | 0.8809 | 0.8806 | 0 / 0 |
+| SAM 2.1 small | 0.8850 | 0.8846 | 0 / 0 |
+| SAM 2.1 base+ | 0.8894 | 0.8893 | 0 / 0 |
+| SAM 2.1 large | 0.8919 | 0.8918 | 0 / 1 |
+
+For SAM 2.1, then, speed is level with Meta's current code, because the GPU is
+the limit for both. What tamserve changes is memory, which stays put as cameras
+are added and as time passes, and the interface: frames arrive one at a time
+from live cameras instead of from a video loaded in full.
 
 ## Waiting inside a step
 

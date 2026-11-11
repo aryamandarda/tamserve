@@ -1,0 +1,19 @@
+# Footage and run outputs never enter git
+data
+results
+*.mp4
+*.mov
+
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets: a catch-all, not just .env
+.env
+.env.*
+*.pem
+*.key
+
+# macOS: iCloud never syncs *.nosync; .venv, data and results link into them
+*.nosync

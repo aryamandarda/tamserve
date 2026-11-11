@@ -1,6 +1,6 @@
 [project]
 name = "tamserve"
-version = "0.0.1"
+version = "0.1.0"
 description = "Live, multi-camera tracking with SAM 2 and EdgeTAM on a single GPU: one model serves every camera."
 license = "Apache-2.0"
 readme = "README.md"

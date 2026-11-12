@@ -1,3 +1,5 @@
+import os
+import signal
 import socket
 import subprocess
 import sys
@@ -122,10 +124,74 @@ def test_router_with_workers_on_other_machines(tmp_path, workers):
 
     # A wrong token is refused, and the workers forgot the first router: the next starts afresh.
     with pytest.raises(PermissionError):
-        Router(workers=workers[:1], token="not the token they were given")
+        Router(workers=workers[:1], token="x" * 40)
     path, seeds, raw = videos["b"]
     with Router(workers=workers[:1], token=TOKEN) as router:
         router.add_camera("b", path, skip=False)
         router.start("b", 1, seeds[1].numpy(), frame=0)
         got = _collect(router, lambda g: _count(g) == 5)
     _assert_tracked_like(want["b"], got["b"], objects=1, frames=5)
+
+
+def test_limits_and_short_tokens():
+    a, b = Pipe()
+    a.send_bytes(b'{"n": 5000, "m": null}')
+    with pytest.raises(ValueError):
+        wire.recv(b)  # more arrays than a message may carry
+    with pytest.raises(ValueError):
+        Router(workers=["127.0.0.1:9"], token="short")  # guessable from a recorded handshake
+
+
+def test_a_worker_turns_away_what_it_cannot_serve(workers, monkeypatch):
+    # Garbage after a good login ends that session, not the worker.
+    from multiprocessing.connection import Client
+    host, port = workers[0].split(":")
+    conn = Client((host, int(port)), family="AF_INET")
+    wire.prove_router(conn, TOKEN.encode())
+    wire.send(conn, ("hello", wire.PROTOCOL, time.time()))
+    assert wire.recv(conn, timeout=30)[0] == "ready"
+    wire.send(conn, 42)
+    conn.close()
+    # A second router is told at once that the worker is taken, not left waiting.
+    with Router(workers=workers[:1], token=TOKEN):
+        t = time.time()
+        with pytest.raises(RuntimeError, match="another router"):
+            Router(workers=workers[:1], token=TOKEN)
+        assert time.time() - t < 10
+    # A router of another version is told so.
+    monkeypatch.setattr(wire, "PROTOCOL", 999)
+    with pytest.raises(RuntimeError, match="protocol"):
+        Router(workers=workers[:1], token=TOKEN)
+
+
+def test_a_frozen_router_is_let_go(tmp_path, workers):
+    # A router whose machine vanishes without closing its connection: after
+    # _SILENCE seconds without a word, the worker ends that session and takes the next.
+    (tmp_path / "token").write_text(TOKEN)
+    script = tmp_path / "first.py"
+    script.write_text(f"""import time
+from tamserve import Router
+if __name__ == "__main__":
+    r = Router(workers=["{workers[1]}"], token=open(r"{tmp_path / 'token'}").read())
+    print("connected", flush=True)
+    time.sleep(600)
+""")
+    log = tmp_path / "first.log"
+    first = subprocess.Popen([sys.executable, str(script)], stdout=log.open("w"), stderr=subprocess.STDOUT)
+    try:
+        deadline = time.time() + 60
+        while "connected" not in log.read_text():
+            assert time.time() < deadline and first.poll() is None, log.read_text()
+            time.sleep(0.2)
+        os.kill(first.pid, signal.SIGSTOP)
+        t = time.time()
+        while True:
+            try:
+                Router(workers=workers[1:], token=TOKEN).close()
+                break
+            except RuntimeError:
+                assert time.time() - t < 40, "the worker never let the frozen router go"
+                time.sleep(1)
+    finally:
+        os.kill(first.pid, signal.SIGCONT)
+        first.kill()

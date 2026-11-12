@@ -93,3 +93,110 @@ def test_a_prompt_on_a_frame_already_passed(tmp_path):
     red = {f: {1: got["a"][f]["red"]} for f in range(6)}
     _assert_tracked_like(_alone(pred, frames[2:], _disc_at(YELLOW, 2)), yellow, objects=1, frames=4)
     _assert_tracked_like(_alone(pred, frames, seeds[1]), red, objects=1, frames=6)
+
+
+class Flaky:
+    """A camera whose stream drops after `drop_after` frames and comes back where it
+    was, as a live stream does; or one that never opens."""
+
+    def __init__(self, folder, drop_after=None, never=False, bad=False):
+        self.paths = sorted(Path(folder).glob("*.jpg"), key=lambda p: int(p.stem))
+        self.drop_after, self.never, self.bad, self.at, self.opened = drop_after, never, bad, 0, 0
+
+    def __call__(self):
+        self.opened += 1
+        if self.never:
+            raise ConnectionError("no route to the camera")
+        return self
+
+    def read(self):
+        if self.bad:
+            return np.zeros((8, 8, 3), np.float32)
+        if self.at == self.drop_after and self.opened == 1:
+            raise ConnectionError("the stream stopped sending frames")
+        if self.at == len(self.paths):
+            return None
+        self.at += 1
+        return np.asarray(Image.open(self.paths[self.at - 1]).convert("RGB"))
+
+
+def _statuses(router, camera, until, timeout=120):
+    seen, deadline = [], time.time() + timeout
+    for u in router.results(timeout=timeout):
+        if u.camera == camera and u.status:
+            seen.append(u.status)
+            if until in seen:
+                return seen
+        assert time.time() < deadline
+    raise AssertionError(f"no {until!r} for {camera}: {seen}")
+
+
+def test_a_dropped_camera_comes_back_and_keeps_its_objects(tmp_path):
+    folder, seeds, frames = _video(tmp_path / "a", 96, 128, 6, [RED], seed=0)
+    want = _alone(build_video_predictor("cpu"), frames, seeds[1])
+    got = {}
+    with Router(workers=["cpu"]) as router:
+        router.add_camera("a", Flaky(folder, drop_after=3), skip=False)
+        router.start("a", 1, seeds[1].numpy(), frame=0)
+        seen = []
+        for u in router.results(timeout=120):
+            seen += [u.status] if u.status else []
+            for obj, mask in u.masks.items():
+                got.setdefault(u.frame, {})[obj] = torch.from_numpy(mask.array())
+            if len(got) == 6:
+                break
+        assert seen[:2] == ["disconnected", "reconnected"]
+        assert router.status()["cameras"]["a"]["state"] in ("tracking", "ended")  # its six frames may be over
+    _assert_tracked_like(want, got, objects=1, frames=6)  # the object carried on through the gap
+
+
+def test_a_camera_that_never_returns_ends_once_retry_for_runs_out(tmp_path):
+    folder, _, _ = _video(tmp_path / "a", 48, 64, 2, [RED], seed=0)
+    with Router(workers=["cpu"]) as router:
+        t = time.time()
+        router.add_camera("gone", Flaky(folder, never=True), retry_for=2.5)
+        seen = _statuses(router, "gone", "ended")
+        assert seen[0] == "disconnected" and "reconnecting" in seen and time.time() - t < 15
+        assert router.status()["cameras"]["gone"]["state"] == "ended"
+
+
+def test_bad_frames_and_bad_prompts_stay_with_their_camera(tmp_path):
+    folder, seeds, frames = _video(tmp_path / "a", 96, 128, 5, [RED], seed=0)
+    errors, got = [], {}
+    with Router(workers=["cpu"]) as router:
+        router.add_camera("broken", Flaky(folder, bad=True), retry_for=0)
+        router.add_camera("good", functools.partial(Frames, folder), skip=False)
+        router.start("good", "red", seeds[1].numpy(), frame=0)
+        router.start("good", "wrong", np.zeros((3, 3), bool), frame=0)  # not the frame's size
+        for u in router.results(timeout=120):
+            if u.error:
+                errors.append((u.camera, u.error))
+            got.update({u.frame: {1: torch.from_numpy(m.array())} for o, m in u.masks.items() if o == "red"})
+            if len(got) == 5 and any(c == "broken" for c, _ in errors):
+                break
+    assert any(c == "good" and "could not start 'wrong'" in e for c, e in errors)
+    assert any(c == "broken" and "uint8" in e for c, e in errors)
+    _assert_tracked_like(_alone(build_video_predictor("cpu"), frames, seeds[1]), got, objects=1, frames=5)
+
+
+def test_a_lost_worker_hands_its_cameras_over_and_comes_back(tmp_path):
+    folder, seeds, _ = _video(tmp_path / "a", 96, 128, 40, [RED], seed=0)
+    with Router(workers=["cpu", "cpu"]) as router:
+        router.add_camera("a", functools.partial(Frames, folder), skip=False)
+        router.start("a", 1, seeds[1].numpy(), frame=0)
+        lost = router.home["a"]
+        for u in router.results(timeout=120):
+            if u.masks:
+                break
+        router._workers[lost].process.kill()  # as if it crashed
+        seen = _statuses(router, "a", "moved")
+        assert router.home["a"] != lost
+        for u in router.results(timeout=120):
+            if u.camera == "a" and u.masks:
+                break  # tracking carries on, on the other worker, from the last mask
+        deadline = time.time() + 120
+        while not router.status()["workers"][lost]["running"]:
+            assert time.time() < deadline, "the lost worker was never brought back"
+            time.sleep(1)
+        s = router.status()
+        assert s["cameras"]["a"]["worker"] == "cpu" and s["cameras"]["a"]["objects"] == [1]

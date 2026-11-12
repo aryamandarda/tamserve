@@ -18,9 +18,12 @@ import torch
 
 from tamserve.engine import Box, Clicks
 
-_HEADER_MAX = 1 << 20  # bytes of JSON in one message
-_BLOB_MAX = 1 << 28    # bytes in one array: the mask of a 4K frame is 8 MB
-_BLOBS_MAX = 4096      # arrays in one message
+PROTOCOL = 1  # raised whenever the messages change: a router and a worker must agree on it
+TOKEN_MIN = 32
+_HEADER_MAX = 1 << 20    # bytes of JSON in one message
+_ARRAY_MAX = 64 << 20    # bytes in one array: the mask of a 4K frame is 8 MB
+_MESSAGE_MAX = 256 << 20  # bytes in one message, arrays included
+_ARRAYS_MAX = 1024       # arrays in one message
 _DTYPES = {"bool", "uint8", "int32", "int64", "float32", "float64"}
 
 
@@ -53,6 +56,7 @@ class Update(NamedTuple):
     masks: dict
     error: str | None = None
     ended: bool = False   # the camera's stream has ended and all of it has been tracked
+    status: str | None = None  # a change in how the camera is doing; error then says why (see Router.results)
 
 
 _TYPES = {"Box": Box, "Clicks": Clicks, "Mask": Mask, "Update": Update}
@@ -73,11 +77,16 @@ def recv(conn, timeout: float | None = None):
     if timeout is not None and not conn.poll(timeout):
         raise TimeoutError("no message arrived in time")
     try:
-        header = json.loads(conn.recv_bytes(_HEADER_MAX))
-        n = header["n"]
-        if not isinstance(n, int) or not 0 <= n <= _BLOBS_MAX:
+        raw = conn.recv_bytes(_HEADER_MAX)
+        header = json.loads(raw)
+        n, size, blobs = header["n"], len(raw), []
+        if not isinstance(n, int) or not 0 <= n <= _ARRAYS_MAX:
             raise ValueError
-        blobs = [conn.recv_bytes(_BLOB_MAX) for _ in range(n)]
+        for _ in range(n):
+            blobs.append(conn.recv_bytes(_ARRAY_MAX))
+            size += len(blobs[-1])
+            if size > _MESSAGE_MAX:
+                raise ValueError
         return _from(header["m"], blobs)
     except (KeyError, TypeError, ValueError, RecursionError, UnicodeDecodeError) as e:
         raise ValueError("a malformed message") from e
@@ -126,6 +135,15 @@ def _from(x, blobs):
     return _TYPES[kind](*values)
 
 
+def check_token(token: str | bytes) -> bytes:
+    """The token as bytes, if it is long enough to be hard to guess from a recorded handshake."""
+    token = (token.encode() if isinstance(token, str) else token).strip()
+    if len(token) < TOKEN_MIN:
+        raise ValueError(f"the token must be at least {TOKEN_MIN} characters; make one with "
+                         'python -c "import secrets; print(secrets.token_hex(32))"')
+    return token
+
+
 def _proof(token: bytes, role: bytes, challenge: bytes) -> bytes:
     return hmac.new(token, role + challenge, hashlib.sha256).digest()
 
@@ -154,7 +172,7 @@ def prove_router(conn, token: bytes, timeout: float = 30) -> None:
         raise PermissionError("the worker does not know the token")
 
 
-def prove_worker(conn, token: bytes, timeout: float = 10) -> None:
+def prove_worker(conn, token: bytes, timeout: float = 5) -> None:
     """The worker's half of the handshake."""
     mine = secrets.token_bytes(32)
     conn.send_bytes(mine)

@@ -231,9 +231,29 @@ prove they know a shared token, by answering a random challenge with an HMAC-SHA
 of it, so the token never crosses the network. After that every message is plain
 data: a JSON description and the raw bytes of any arrays in it. Only plain values
 and tamserve's own types (Box, Clicks, Mask, Update) can be rebuilt from a message,
-so neither side ever runs anything the other sent. The router also compares its
-clock with each worker's when it connects, so the times on updates are on its own
-clock wherever the frame was decoded.
+so neither side ever runs anything the other sent; a message is also limited in
+size (64 MB per array, 256 MB in all). The router also compares its clock with
+each worker's when it connects, so the times on updates are on its own clock
+wherever the frame was decoded, and both sides check they speak the same version
+of the protocol.
+
+The router sends every worker a sign of life every 2 seconds, and each worker
+reports how busy it is every second, from threads of their own so that a long
+step does not delay them. Either side that hears nothing for 15 seconds treats
+the other as gone: a worker then forgets that router's cameras and waits for the
+next, which is what lets a program whose machine lost power start again. A router
+moves a lost worker's cameras to the others, each object starting from its last
+mask (so it loses its memory of the frames before), and keeps trying to start or
+reach that worker again. A worker's front door handles several newcomers at once,
+each with five seconds to prove it knows the token, so nobody can hold it shut.
+
+Inside a worker, each camera's reader runs on a thread of its own. A network
+stream or reader that fails is opened again with growing waits, and its objects
+are kept. Frames are checked as they arrive and prompts before they are used, so
+a broken camera or a wrong prompt is reported for that camera alone instead of
+failing the step for every camera on the GPU. A worker whose steps fail three
+times in a row decides its GPU is broken and stops, rather than reporting the same
+error forever.
 
 ## Where the model code comes from
 
@@ -274,8 +294,10 @@ or that anyone can write to. The code is stored under the package name
 - One engine drives one GPU and is called from one thread. A `Router` spreads
   cameras over several GPUs, on one machine or many, a worker on each
   ([results.md](results.md#through-a-router)).
-- Router and remote workers authenticate each other but do not encrypt their
-  traffic; run them on a private network or a VPN.
+- Router and remote workers authenticate each other but do not encrypt or
+  protect their traffic; run them on a private network or a VPN.
+- A camera that moves to another worker starts its frame numbers again from 0,
+  and its objects start again from their last masks.
 - The timings are from one RTX 4090. The two tuning choices made from them, CUDA
   graphs for calls of one or two rows and encoder pieces of 4, are safe on any
   GPU but may not be the fastest choice on another.

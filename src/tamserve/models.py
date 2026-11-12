@@ -29,6 +29,9 @@ CACHE = Path(os.environ.get("TAMSERVE_CACHE", Path.home() / ".cache" / "tamserve
 EDGETAM_ROOT = Path(os.environ.get("TAMSERVE_EDGETAM_ROOT", CACHE / f"{PACKAGE}-{EDGETAM_REF[:7]}")).resolve()
 
 _SAM21 = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/"
+# Meta's own copies on Hugging Face: the same files, checked against the same digests,
+# for when Meta's server cannot be reached (its certificate lapsed on 2026-11-12).
+_SAM21_MIRROR = "https://huggingface.co/facebook/sam2.1-hiera-{size}/resolve/main/"
 MODELS = {  # name -> (config, checkpoint URL and its SHA-256; None = ships with EdgeTAM)
     "edgetam": ("configs/edgetam.yaml", None, None),
     "sam2.1-tiny": ("configs/sam2.1/sam2.1_hiera_t.yaml", _SAM21 + "sam2.1_hiera_tiny.pt",
@@ -69,19 +72,26 @@ def _tree_sha256(root: Path) -> str:
     return h.hexdigest()
 
 
-def _download(url: str, path: Path, sha256: str | None = None) -> Path:
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        part = path.with_name(f"{path.name}.{os.getpid()}.part")  # its own, if several processes start at once
+def _download(urls: str | list, path: Path, sha256: str | None = None) -> Path:
+    """`path`, downloaded from the first of `urls` that answers with the pinned file."""
+    if path.exists():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(f"{path.name}.{os.getpid()}.part")  # its own, if several processes start at once
+    problems = []
+    for url in [urls] if isinstance(urls, str) else urls:
         try:
             with urllib.request.urlopen(url, timeout=60) as r, part.open("wb") as f:
                 shutil.copyfileobj(r, f, 1 << 20)
             if sha256 and _sha256([part]) != sha256:
-                raise RuntimeError(f"{url} did not match its pinned SHA-256; refusing to use it")
+                raise RuntimeError("it did not match its pinned SHA-256")
             part.replace(path)
+            return path
+        except (OSError, RuntimeError) as e:  # urllib's errors are OSErrors
+            problems.append(f"{url}: {e}")
         finally:
             part.unlink(missing_ok=True)
-    return path
+    raise RuntimeError(f"could not download {path.name}, refusing anything unverified: " + "; ".join(problems))
 
 
 def _patched(perceiver: Path) -> bool:
@@ -159,7 +169,9 @@ def checkpoint(model: str) -> Path:
     _, url, sha256 = MODELS[model]
     if url is None:
         return edgetam_root() / "checkpoints" / "edgetam.pt"
-    return _download(url, CACHE / url.rsplit("/", 1)[1], sha256)
+    name = url.rsplit("/", 1)[1]
+    mirror = _SAM21_MIRROR.format(size=model.split("-", 1)[1]) + name
+    return _download([url, mirror], CACHE / name, sha256)
 
 
 def build_video_predictor(device: str = "cuda", model: str = "edgetam"):

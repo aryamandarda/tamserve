@@ -42,3 +42,17 @@ def test_code_others_can_write_is_not_imported(tmp_path, monkeypatch):
     tmp_path.chmod(0o777)
     with pytest.raises(RuntimeError, match="another user"):
         models.edgetam_root()
+
+
+def test_a_download_falls_back_to_the_mirror_and_is_always_checked(tmp_path):
+    from tamserve.models import _download, _sha256
+    good = tmp_path / "weights.pt"
+    good.write_bytes(b"the real weights")
+    bad = tmp_path / "tampered.pt"
+    bad.write_bytes(b"something else")
+    pin = _sha256([good])
+    gone = (tmp_path / "nowhere.pt").as_uri()
+    assert _download([gone, good.as_uri()], tmp_path / "a" / "w.pt", pin).read_bytes() == b"the real weights"
+    with pytest.raises(RuntimeError, match="SHA-256"):
+        _download([bad.as_uri(), gone], tmp_path / "b" / "w.pt", pin)  # a wrong file is never kept
+    assert not list((tmp_path / "b").iterdir())

@@ -2,7 +2,7 @@
 
 # tamserve
 
-**Live, multi-camera tracking with SAM 2, on a single GPU.**
+**Live, multi-camera tracking with SAM 2, on one GPU or many.**
 
 SAM 2 and its smaller sibling EdgeTAM can track anything you point at, but their code was written for one recorded video at a time.<br>
 tamserve is the serving engine they are missing: one copy of the model tracks every object on every camera, for as long as the cameras run.

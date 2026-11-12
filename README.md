@@ -14,12 +14,13 @@ tamserve is the serving engine they are missing: one copy of the model tracks ev
 ![Memory](https://img.shields.io/badge/GPU%20memory-4x%20less%20at%208%20cameras-2ea44f)
 ![Accuracy](https://img.shields.io/badge/accuracy-unchanged%20on%20DAVIS%202017-2ea44f)
 ![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aryamandarda/tamserve/blob/main/notebooks/quickstart.ipynb)
 
 [Why tamserve](#why-tamserve) · [New to video tracking?](#new-to-video-tracking) · [Using it](#using-it) · [How it works](#how-it-works) · [Results](#results) · [Limits](#limits)
 
-<a href="docs/media/tamserve-demo.mp4"><img src="docs/media/camera-wall.gif" width="880" alt="Nine cameras and fifteen objects followed by one tamserve engine on one GPU, with its recorded frames per second"></a>
+<a href="https://github.com/aryamandarda/tamserve/blob/main/docs/media/tamserve-demo.mp4"><img src="https://raw.githubusercontent.com/aryamandarda/tamserve/main/docs/media/camera-wall.gif" width="880" alt="Nine cameras and fifteen objects followed by one tamserve engine on one GPU, with its recorded frames per second"></a>
 
-<sub>Nine cameras tracked by one model on one GPU. <a href="docs/media/tamserve-demo.mp4">Watch the 37-second demo</a>, or read <a href="docs/demo.md">how it was recorded</a>.</sub>
+<sub>Nine cameras tracked by one model on one GPU. <a href="https://github.com/aryamandarda/tamserve/blob/main/docs/media/tamserve-demo.mp4">Watch the 37-second demo</a>, or read <a href="https://github.com/aryamandarda/tamserve/blob/main/docs/demo.md">how it was recorded</a>.</sub>
 
 </div>
 
@@ -67,7 +68,7 @@ Four words come up a lot below:
 ### Install
 
 ```bash
-pip install git+https://github.com/aryamandarda/tamserve.git
+pip install tamserve
 ```
 
 You need Python 3.10 or newer and an NVIDIA GPU. It does run on a CPU, which is handy for trying it out but much too slow for live video.
@@ -299,7 +300,7 @@ What each step bought, EdgeTAM, compiled, frames per second:
 | + tuned kernels, CUDA graphs for small calls, encoder in pieces of 4 | 221 | 275 | 322 | 326 | 309 |
 | + one position encoding, 16 objects per pass | 220 | 288 | 347 | 340 | 334 |
 
-The full account, including what was tried and dropped: [docs/how-it-works.md](docs/how-it-works.md).
+The full account, including what was tried and dropped: [docs/how-it-works.md](https://github.com/aryamandarda/tamserve/blob/main/docs/how-it-works.md).
 
 ## Results
 
@@ -379,7 +380,7 @@ SAM 2.1 keeps 8 times as many memory tokens per frame as EdgeTAM, so the GPU is 
 
 The other three sizes agree with Meta's code just as closely: 0.8850, 0.8894 and 0.8919 for Meta's, against 0.8846, 0.8893 and 0.8918.
 
-More tables, a breakdown of where the time goes, and the command behind every number: [docs/results.md](docs/results.md).
+More tables, a breakdown of where the time goes, and the command behind every number: [docs/results.md](https://github.com/aryamandarda/tamserve/blob/main/docs/results.md).
 
 ## Limits
 
@@ -400,7 +401,7 @@ What to expect in practice:
 ```bash
 git clone https://github.com/aryamandarda/tamserve.git && cd tamserve
 uv sync --group dev --group bench
-uv run pytest                                   # 37 tests on a CPU, 44 with two GPUs
+uv run pytest                                   # 40 tests on a CPU, 48 with two GPUs
 scripts/fetch_davis.sh                          # DAVIS 2017, 833 MB, for the accuracy benchmark
 
 uv run python bench/throughput.py --arms procs-compiled --procs 1,2,4,8                    # stock
@@ -423,22 +424,22 @@ The stock arms need NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark 
 
 | path | what is there |
 |---|---|
-| [`src/tamserve/engine.py`](src/tamserve/engine.py) | the engine: batching, per-object memory, compiling |
-| [`src/tamserve/router.py`](src/tamserve/router.py), [`worker.py`](src/tamserve/worker.py), [`wire.py`](src/tamserve/wire.py) | cameras spread over several GPUs: placing them, the worker on each GPU, and how router and workers on other machines talk |
-| [`src/tamserve/models.py`](src/tamserve/models.py) | fetching, checking and loading EdgeTAM and SAM 2.1 |
-| [`src/tamserve/reference.py`](src/tamserve/reference.py), [`compare.py`](src/tamserve/compare.py) | the stock predictor as a reference, and mask comparison |
-| [`tests/`](tests/) | bit-for-bit checks against stock; objects joining, leaving and restarting |
-| [`bench/`](bench/) | the scripts behind every number here |
-| [`docs/`](docs/) | how it works, and all results |
+| [`src/tamserve/engine.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/engine.py) | the engine: batching, per-object memory, compiling |
+| [`src/tamserve/router.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/router.py), [`worker.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/worker.py), [`wire.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/wire.py) | cameras spread over several GPUs: placing them, the worker on each GPU, and how router and workers on other machines talk |
+| [`src/tamserve/models.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/models.py) | fetching, checking and loading EdgeTAM and SAM 2.1 |
+| [`src/tamserve/reference.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/reference.py), [`compare.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/compare.py) | the stock predictor as a reference, and mask comparison |
+| [`tests/`](https://github.com/aryamandarda/tamserve/tree/main/tests/) | bit-for-bit checks against stock; objects joining, leaving and restarting |
+| [`bench/`](https://github.com/aryamandarda/tamserve/tree/main/bench/) | the scripts behind every number here |
+| [`docs/`](https://github.com/aryamandarda/tamserve/tree/main/docs/) | how it works, and all results |
 
 | read more | what it covers |
 |---|---|
-| [How it works](docs/how-it-works.md) | the model, continuous batching, each speed change and why it is exact, limits |
-| [Results](docs/results.md) | every measurement with its command, start-up times, the per-stage profile, what was tried and dropped |
-| [The demo video](docs/demo.md) | what each scene shows, how it was recorded, footage sources |
+| [How it works](https://github.com/aryamandarda/tamserve/blob/main/docs/how-it-works.md) | the model, continuous batching, each speed change and why it is exact, limits |
+| [Results](https://github.com/aryamandarda/tamserve/blob/main/docs/results.md) | every measurement with its command, start-up times, the per-stage profile, what was tried and dropped |
+| [The demo video](https://github.com/aryamandarda/tamserve/blob/main/docs/demo.md) | what each scene shows, how it was recorded, footage sources |
 
 ## Credits and licence
 
 Created by [**Aryaman Darda**](https://github.com/aryamandarda).
 
-tamserve is Apache-2.0. It runs [EdgeTAM](https://github.com/facebookresearch/EdgeTAM) and [SAM 2.1](https://github.com/facebookresearch/sam2) by Meta, both Apache-2.0, which it downloads and does not redistribute. Accuracy is measured on [DAVIS 2017](https://davischallenge.org/), which is for research use; check its licence before using it for anything else. The demo's footage is from [Pexels](https://www.pexels.com), under the Pexels licence; sources are listed in [docs/demo.md](docs/demo.md).
+tamserve is Apache-2.0. It runs [EdgeTAM](https://github.com/facebookresearch/EdgeTAM) and [SAM 2.1](https://github.com/facebookresearch/sam2) by Meta, both Apache-2.0, which it downloads and does not redistribute. Accuracy is measured on [DAVIS 2017](https://davischallenge.org/), which is for research use; check its licence before using it for anything else. The demo's footage is from [Pexels](https://www.pexels.com), under the Pexels licence; sources are listed in [docs/demo.md](https://github.com/aryamandarda/tamserve/blob/main/docs/demo.md).

@@ -36,6 +36,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/tamserve"]
 
+[tool.hatch.build.targets.sdist]
+# Everything needed to build, test and benchmark it; the demo video and GIF stay on GitHub.
+only-include = ["src", "tests", "bench", "scripts", "docs/how-it-works.md", "docs/results.md", "docs/demo.md",
+                "README.md", "LICENSE", "uv.lock"]
+
 [tool.pytest.ini_options]
 # Not the editable install: cloud-synced folders mark its .pth file hidden and Python skips it.
 pythonpath = ["src"]

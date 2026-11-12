@@ -219,3 +219,15 @@ def test_moving_a_full_size_mask_does_not_lock_the_router(tmp_path):
             if u.camera == "big" and u.masks:
                 assert u.masks[1].shape == (720, 1280)
                 break
+
+
+def test_a_burst_of_cameras_is_spread_even_when_one_worker_was_busy():
+    # One worker last reported a camera's worth of work, the other nothing yet: eight
+    # cameras added before the next report must still be split between them.
+    from types import SimpleNamespace
+    router = Router.__new__(Router)
+    router._workers = [SimpleNamespace(alive=True, remote=False, busy=0.0, counted=0, cameras=set()),
+                       SimpleNamespace(alive=True, remote=False, busy=0.15, counted=1, cameras=set())]
+    for camera in range(8):
+        router._workers[router._place("rtsp://camera")].cameras.add(camera)
+    assert [len(w.cameras) for w in router._workers] == [4, 4]

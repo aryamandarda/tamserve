@@ -393,11 +393,16 @@ class Router:
         return camera
 
     def _place(self, source):
-        """The running worker with the most room for `source`: how busy it last said it
-        was, scaled to the cameras it has now (some may have come since), fewest
-        cameras on a tie. A reader function can only go to a worker on this machine."""
+        """The running worker with the most room for `source`: what one camera costs it,
+        from how busy it last said it was, times the cameras it would have, fewest
+        cameras on a tie. A worker that has not yet reported any camera is taken to cost
+        what a camera costs the others, so that a burst of new cameras is not all sent to
+        it. A reader function can only go to a worker on this machine."""
+        known = [w.busy / w.counted for w in self._workers if w.alive and w.counted]
+        typical = sum(known) / len(known) if known else 0.0
+
         def load(w):
-            per_camera = w.busy / w.counted if w.counted else 0.0
+            per_camera = w.busy / w.counted if w.counted else typical
             return per_camera * (len(w.cameras) + 1), len(w.cameras)
         running = [i for i, w in enumerate(self._workers) if w.alive and (isinstance(source, str) or not w.remote)]
         if not running:

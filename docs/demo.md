@@ -1,37 +1,34 @@
 # The demo video
 
-[`media/tamserve-demo.mp4`](media/tamserve-demo.mp4), 37 seconds. Three runs recorded on one RTX 4090
-with EdgeTAM. Every mask, speed and memory figure on screen is read from the recording; only the last
-card, which repeats the README's benchmark table, is typed in.
+[`media/tamserve-demo.mp4`](media/tamserve-demo.mp4), 34 seconds. Three runs recorded through one
+`Router` on two RTX 4090s, with EdgeTAM compiled. Every mask, frame rate, delay and status on screen is
+read from the recordings. Only the GPU memory scene repeats numbers measured separately, from the
+[README](../README.md#results).
 
 ## What is on screen
 
 | scene | what was recorded |
 |---|---|
-| Camera wall | Nine clips played as nine cameras with 15 objects between them, through one compiled engine: 208 frames/s in total, 23 per camera, 43 ms per step, 1.0 GB of GPU memory for the engine. The wall plays at the speed it was processed, which is a little slower than the 30 frames/s footage. |
-| The same masks | One 300-frame clip with three objects, through the stock predictor and through tamserve with `exact=True`. Of 829 million mask pixels, 0 differ. Stock holds 3.75 to 4.0 GB of GPU memory, because it loads the whole clip first; tamserve holds 0.17 GB. |
-| Objects come and go | One camera. A forklift is followed from the first frame; a second is added on frame 80, when it has driven into view; the first is dropped on frame 230. EdgeTAM's own predictor raises `Cannot add new object id ... after tracking starts` at the second step. |
-| Benchmark card | The like-for-like table from the [README](../README.md#results), measured separately. |
+| Camera wall | 18 live cameras (nine clips and their mirror images) with 30 objects between them, nine cameras and 15 objects per GPU. Each camera streams at 30 frames/s, more than two GPUs can track, so every step takes each camera's newest frame. Over the 5.5 seconds shown: 360 frames/s in total (351 to 369), 20 per camera, and a median of 67 ms from a frame being decoded to its masks reaching the program (95th percentile 81 ms). |
+| GPU memory | The README's figures. Eight cameras at once: 8.6 GB with the model's own code, which loads one copy per camera, and 2.2 GB with tamserve. One camera at frame 800: 9.8 GB against 0.28 GB. |
+| Start and stop tracking | One live camera. The blue forklift is followed from frame 0. The orange forklift's box was drawn on frame 80 but only sent at frame 100, as a slow detector would: `router.start(camera, "orange", box, frame=80)`. The worker started it on frame 80 from the recent frames it keeps and caught up; its first mask arrived around frame 104. The blue forklift is stopped at frame 230. Nothing else on the camera is disturbed. |
+| Failures | Eight live cameras, four per GPU, 224 frames/s in total. At 2.5 s one camera's stream stops for 2.5 seconds. Its worker keeps retrying, and the camera reconnects at 5.7 s with the objects it had. At 4.0 s the worker process on GPU 1 is killed with SIGKILL. 0.4 s later its four cameras are running on GPU 0, each object restarting from its last mask, and with one GPU serving all eight the total settles at 200 frames/s. |
 
 ## How it was recorded
 
-- **Clips.** Each clip was cut to 300 frames of 1280x720. Sources slower than 30 frames/s are played at
-  30, so some motion is up to a quarter faster than life.
+- **Cameras.** Each clip was cut to 300 frames of 1280x720 and played as a live camera: frame k is due
+  k/30 seconds after the start, whether or not anyone is reading, and frames nobody read in time are
+  skipped. Sources slower than 30 frames/s are played at 30, so some motion is up to a quarter faster
+  than life. Every camera logged which frame it sent and when, so each mask is drawn on the exact
+  picture it was computed from.
 - **Starting boxes.** A COCO detector (torchvision's Faster R-CNN) on each clip's first frame, checked
-  by eye. tamserve does not find objects; this is the "something else supplies the box" step.
-- **Camera wall.** `Engine(compile=True)`. Frames were decoded and placed on the GPU beforehand, as in
-  the benchmarks, and every step was timed with the GPU synchronised before and after, masks copied to
-  the CPU each time. Median step 43.2 ms, 95th percentile 43.7 ms; the first 19 steps, while the
-  objects' memories fill, average 59 ms. GPU memory is PyTorch's peak allocation minus the 7.9 GB of
-  frames waiting on the GPU. The same run with 12 objects instead of 15 took 36 ms per step: 250
-  frames/s, 28 per camera.
-- **The same masks.** Both sides uncompiled, bf16. Stock loads the clip and tracks it; tamserve is
-  given one frame at a time. Differing pixels are counted at 1280x720 on every frame. Per frame, stock
-  took 21.3 ms and tamserve 20.8 ms.
-- **Objects come and go.** An uncompiled engine. The second forklift's box is the detector's, run on
-  frame 80.
-- **The picture.** Drawn afterwards from the saved masks and timings. The counters on the wall replay
-  the recorded step times; masks were saved at half resolution for drawing.
+  by eye, and on frame 80 for the orange forklift. tamserve does not find objects; this is the
+  "something else supplies the box" step.
+- **Serving.** `Router(workers=["cuda:0", "cuda:1"], compile=True)`: one worker process per GPU, each
+  opening and decoding its own cameras. The wall is shown from 4 s into its run, once every camera has
+  been tracked for at least two seconds.
+- **The picture.** Drawn afterwards from the saved updates: masks, statuses and when each arrived. The
+  frame-rate counters count the updates that reached the program in the previous second.
 
 ## Footage
 

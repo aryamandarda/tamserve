@@ -18,9 +18,9 @@ tamserve is the serving engine they are missing: one copy of the model tracks ev
 
 [Why tamserve](#why-tamserve) · [New to video tracking?](#new-to-video-tracking) · [Using it](#using-it) · [How it works](#how-it-works) · [Results](#results) · [Limits](#limits)
 
-<a href="https://github.com/aryamandarda/tamserve/blob/main/docs/media/tamserve-demo.mp4"><img src="https://raw.githubusercontent.com/aryamandarda/tamserve/main/docs/media/camera-wall.gif" width="880" alt="Nine cameras and fifteen objects followed by one tamserve engine on one GPU, with its recorded frames per second"></a>
+<a href="https://github.com/aryamandarda/tamserve/blob/main/docs/media/tamserve-demo.mp4"><img src="https://raw.githubusercontent.com/aryamandarda/tamserve/main/docs/media/camera-wall.gif" width="880" alt="Eighteen live cameras and thirty objects tracked by tamserve on two GPUs, with the recorded frames per second"></a>
 
-<sub>Nine cameras tracked by one model on one GPU. <a href="https://github.com/aryamandarda/tamserve/blob/main/docs/media/tamserve-demo.mp4">Watch the 37-second demo</a>, or read <a href="https://github.com/aryamandarda/tamserve/blob/main/docs/demo.md">how it was recorded</a>.</sub>
+<sub>18 live cameras tracked on two GPUs. <a href="https://github.com/aryamandarda/tamserve/blob/main/docs/media/tamserve-demo.mp4">Watch the 34-second demo</a>, or read <a href="https://github.com/aryamandarda/tamserve/blob/main/docs/demo.md">how it was recorded</a>.</sub>
 
 </div>
 
@@ -392,7 +392,7 @@ What tamserve does not do:
 
 What to expect in practice:
 
-- **More objects cost more.** The speeds on this page are for one object per camera. Each extra object adds about 2.4 ms to a round. In the demo, nine cameras with 15 objects ran at 208 frames/s, which is 23 per camera.
+- **More objects cost more.** The speeds on this page are for one object per camera. Each extra object adds about 2.4 ms to a round. In the demo, each GPU served nine live cameras with 15 objects at 180 frames/s, which is 20 per camera, decoding included.
 - **The first compiled start takes about 20 minutes.** After that it is about 95 seconds, as long as PyTorch's cache of compiled code is still there. A new machine or a fresh container starts from scratch. `compile="default"` is ready in under 3 minutes.
 - **Other GPUs will give other numbers.** Nothing in tamserve is tied to the RTX 4090. It runs on any NVIDIA GPU that PyTorch supports, compiling included, because the compile step tunes itself to whatever card it starts on. You will get the same masks. You will not get the same speeds, since every figure here comes from one 4090, and with one or two cameras the frame rate also depends on how fast the CPU is. The lead over stock comes from work the engine skips, so it should carry over, but it has only been measured on this one card.
 

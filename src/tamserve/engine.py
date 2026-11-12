@@ -40,6 +40,7 @@ _OBJECT_BATCH = 16
 # one camera on an RTX 4090); with more the GPU is, and replaying costs it 4 to 8%.
 _GRAPH_ROWS = 2
 _GRAPH_MODES = ("reduce-overhead", "max-autotune")  # the torch.compile modes that use CUDA graphs
+_RESIZE_BATCH = 16  # raw frames resized together: 16 at 1080p take 0.4 GB while they are floats
 
 
 class Box(NamedTuple):
@@ -57,46 +58,33 @@ class Clicks(NamedTuple):
     labels: list | None = None
 
 
-def prepare(image, size: int = 1024, device=None, *, resize_on_device: bool = False):
-    """A frame resized exactly as stock load_video_frames resizes it, kept as
-    uint8, optionally uploaded to `device` so the step does not pay for it.
+def prepare(image, size: int = 1024, device=None):
+    """A frame resized on the CPU exactly as stock load_video_frames resizes it, kept
+    as uint8, optionally uploaded to `device` so the step does not pay for it. For
+    masks that must match stock's bit for bit; otherwise hand step() the frame as it
+    is and the engine resizes it on the GPU, which is many times cheaper.
     `image` is a PIL image, an H x W x 3 uint8 RGB array (what video decoders
     give; OpenCV's are BGR and need converting), or the path of an image file.
-    resize_on_device uploads the full frame and resizes it there instead, far less
-    CPU work: as PIL does, bicubic, width then height, rounding in between, so
-    pixels match stock's or differ by 1.
     Returns (3 x size x size tensor, (height, width))."""
     if isinstance(image, np.ndarray):
         image = Image.fromarray(image)
     if not isinstance(image, Image.Image):
         with Image.open(image) as f:
-            return prepare(f.convert("RGB"), size, device, resize_on_device=resize_on_device)
-    img = image
-    if resize_on_device:
-        return prepare_batch([img], size, device)[0]
-    pixels = torch.from_numpy(np.array(img.convert("RGB").resize((size, size))))
+            return prepare(f.convert("RGB"), size, device)
+    pixels = torch.from_numpy(np.array(image.convert("RGB").resize((size, size))))
     pixels = pixels.permute(2, 0, 1).contiguous()
-    return (pixels if device is None else pixels.to(device)), (img.height, img.width)
+    return (pixels if device is None else pixels.to(device)), (image.height, image.width)
 
 
-def prepare_batch(images, size: int = 1024, device=None):
-    """prepare(resize_on_device=True) for many PIL frames: frames of one size are
-    uploaded and resized together, 16 at a time, instead of one call per frame."""
-    out, groups = [None] * len(images), {}
-    for i, im in enumerate(images):
-        groups.setdefault((im.height, im.width), []).append(i)
-    for (h, w), idx in groups.items():
-        for k in range(0, len(idx), 16):
-            chunk = idx[k:k + 16]
-            x = torch.from_numpy(np.stack([np.asarray(images[i].convert("RGB")) for i in chunk]))
-            x = x.to(device).permute(0, 3, 1, 2).float()
-            for hh in (h, size):
-                x = F.interpolate(x, size=(hh, size), mode="bicubic", antialias=True, align_corners=False)
-                x = x.round_().clamp_(0, 255)
-            x = x.to(torch.uint8)
-            for j, i in enumerate(chunk):
-                out[i] = (x[j], (h, w))
-    return out
+def _resize(x, size):
+    """N x H x W x 3 uint8 frames as N x 3 x size x size, resized as PIL resizes
+    them: bicubic, width then height, rounded in between. Pixels match prepare()'s
+    or differ by 1."""
+    x = x.permute(0, 3, 1, 2).float()
+    for h in (x.shape[2], size):
+        x = F.interpolate(x, size=(h, size), mode="bicubic", antialias=True, align_corners=False)
+        x = x.round_().clamp_(0, 255)
+    return x.to(torch.uint8)
 
 
 def _cat_backbone(parts):
@@ -173,6 +161,7 @@ class Engine:
         self.tracks: dict = {}  # (camera id, object id) -> _Track, in the order objects started
         self._pos = None  # memory positional encoding: the same for every frame and object
         self._last = None  # the previous step's frames and their features
+        self._stage: dict = {}  # frame shape -> page-locked buffer raw frames are uploaded from
         # Stock divides by 255 in float64 on the CPU, then normalises in float32 on
         # the device. A 256-entry table reproduces the first step exactly; CUDA
         # divides by a scalar through its reciprocal, which rounds differently.
@@ -305,7 +294,9 @@ class Engine:
     def step(self, frames: dict, seeds: dict | None = None) -> dict:
         """One batched pass: every object on every camera here advances one frame.
 
-        frames: camera id -> prepare() output.
+        frames: camera id -> the frame as a decoder gives it (an H x W x 3 uint8
+            RGB array), which the engine uploads and resizes on its device, or
+            prepare() output.
         seeds: camera id -> {object id: bool mask, Box or Clicks}: objects that
             start on this frame, or start again if they are already followed.
         Returns camera id -> {object id: bool mask at the frame's own size}.
@@ -317,7 +308,8 @@ class Engine:
     def add(self, frames: dict, seeds: dict) -> dict:
         """Start objects (or start them again) on frames step() has already been
         given, without advancing the others: for prompts decided after seeing a
-        step's masks. Pass the same frame tensors and they are not encoded again.
+        step's masks. Frames from prepare() that step() was just given are not
+        encoded again; raw frames are.
         Returns the started objects' masks."""
         return self._run(frames, seeds, [], seeds, True)
 
@@ -334,6 +326,7 @@ class Engine:
             return out  # nothing to follow: the frames are not even read
         # Objects of one age side by side, so each memory-attention call is as large as it can be.
         following.sort(key=lambda k: (len(self.tracks[k].mem), len(self.tracks[k].ptr)))
+        frames = self._prepared(frames, busy)
         hw = {c: tuple(frames[c][1]) for c in busy}
         # Stock takes all of a video's objects in one pass, whatever their number.
         cap = len(starting) + len(following) if self.exact else _OBJECT_BATCH
@@ -350,6 +343,41 @@ class Engine:
                 return self._outputs(low, hw, out)
         finally:
             self._use(False)  # the predictor is shared: leave it as stock has it
+
+    def _prepared(self, frames, busy):
+        """The busy cameras' frames as prepare() gives them. Raw frames are resized
+        here, on the engine's device: frames of one size are uploaded together and
+        resized as PIL does (_resize), so pixels match stock's or differ by 1."""
+        out, sizes = {}, {}
+        for c in busy:
+            out[c] = frames[c]
+            if not isinstance(out[c], tuple):
+                out[c] = np.asarray(out[c])
+                if out[c].dtype != np.uint8 or out[c].ndim != 3 or out[c].shape[2] != 3:
+                    raise ValueError(f"camera {c!r}: a frame is an H x W x 3 uint8 array or prepare() output")
+                sizes.setdefault(out[c].shape, []).append(c)
+        for shape, cams in sizes.items():
+            for k in range(0, len(cams), _RESIZE_BATCH):
+                chunk = cams[k:k + _RESIZE_BATCH]
+                x = _resize(self._upload([out[c] for c in chunk]), self.model.image_size)
+                for j, c in enumerate(chunk):
+                    out[c] = (x[j], shape[:2])
+        return out
+
+    def _upload(self, arrays):
+        """Frames of one shape on the device, in one upload. On CUDA they go through a
+        buffer kept for that shape in page-locked memory (memory the system will not
+        move, so the GPU reads it directly)."""
+        if self.device.type != "cuda":
+            return torch.from_numpy(np.stack(arrays)).to(self.device)
+        shape = arrays[0].shape
+        buf = self._stage.get(shape)
+        if buf is None or len(buf) < len(arrays):
+            buf = self._stage[shape] = torch.empty((len(arrays), *shape), dtype=torch.uint8).pin_memory()
+        host = buf.numpy()
+        for i, a in enumerate(arrays):
+            host[i] = a
+        return buf[:len(arrays)].to(self.device)  # waits for the copy, so the buffer can be refilled
 
     def _normalize(self, images):
         x = torch.stack(images).to(self.device, non_blocking=True)

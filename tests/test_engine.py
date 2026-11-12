@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -5,7 +7,7 @@ from PIL import Image
 
 from tamserve.compare import compare
 from tamserve.models import build_video_predictor
-from tamserve.engine import Box, Clicks, Engine, prepare, prepare_batch
+from tamserve.engine import Box, Clicks, Engine, prepare
 from tamserve.reference import track
 
 
@@ -269,18 +271,53 @@ def test_prepare_takes_arrays():
     assert size == size_b == (48, 80) and torch.equal(a, b)
 
 
-def test_resize_on_device_matches_stock(tmp_path):
+def _raw(d):
+    """A video's frames as a decoder hands them over: H x W x 3 uint8 arrays."""
+    paths = sorted(Path(d).glob("*.jpg"), key=lambda p: int(p.stem))
+    return [np.asarray(Image.open(p).convert("RGB")) for p in paths]
+
+
+def _raw_frames_match_prepare(engine):
     rng = np.random.default_rng(0)
-    for h, w in [(1080, 1920), (480, 640)]:
-        im = Image.fromarray(rng.integers(0, 256, (h, w, 3), dtype=np.uint8))
-        a, size = prepare(im)
-        b, size_b = prepare(im, device="cpu", resize_on_device=True)
-        assert size == size_b and (a.int() - b.int()).abs().max() <= 1
-    # Batched: frames of mixed sizes, each identical to preparing it alone.
-    ims = [Image.fromarray(rng.integers(0, 256, (h, w, 3), dtype=np.uint8)) for h, w in [(48, 80), (60, 90), (48, 80)]]
-    for (a, sa), im in zip(prepare_batch(ims, device="cpu"), ims):
-        b, sb = prepare(im, device="cpu", resize_on_device=True)
-        assert sa == sb and torch.equal(a, b)
+    shapes = [(1080, 1920), (48, 80), (60, 90), (48, 80)]
+    for _ in range(2):  # twice: the second pass refills the buffers the first one made
+        raw = {i: rng.integers(0, 256, (h, w, 3), dtype=np.uint8) for i, (h, w) in enumerate(shapes)}
+        got = engine._prepared({**raw, "ready": prepare(raw[1])}, [*raw, "ready"])
+        for i, (h, w) in enumerate(shapes):
+            pixels, size = prepare(raw[i])
+            assert got[i][1] == size == (h, w)
+            assert (got[i][0].cpu().int() - pixels.int()).abs().max() <= 1
+        # Frames of one size go up together: each must come out as it does alone.
+        assert torch.equal(got[1][0], engine._prepared({0: raw[1]}, [0])[0][0])
+        assert torch.equal(got["ready"][0], prepare(raw[1])[0])  # prepare() output passes through
+
+
+def test_raw_frames_are_resized_like_prepare(pred):
+    engine = Engine(pred)
+    _raw_frames_match_prepare(engine)
+    for bad in (np.zeros((48, 80), np.uint8), np.zeros((48, 80, 3), np.float32), np.zeros((48, 80, 4), np.uint8)):
+        with pytest.raises(ValueError):
+            engine.step({"cam": bad}, {"cam": {1: Box(8, 8, 40, 40)}})
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_raw_frames_are_resized_like_prepare_on_gpu():
+    _raw_frames_match_prepare(Engine(build_video_predictor(device="cuda")))
+
+
+def test_raw_frames_track_like_prepared_ones(pred, tmp_path):
+    # Frames straight from a decoder, resized by the engine, against prepare()'s:
+    # a camera of each kind in one step, and add() on a raw frame.
+    a = _video(tmp_path / "a", 96, 128, 5, [RED, YELLOW], seed=0)
+    b = _video(tmp_path / "b", 80, 112, 5, [RED], seed=1)
+    want = _run(Engine(pred), [a, b], [0, 0])
+    raw_a, raw_b = _raw(a[0]), _raw(b[0])
+    engine = Engine(pred)
+    got = [engine.step({0: raw_a[0], 1: b[2][0]}, {0: {1: a[1][1]}, 1: b[1]})]
+    got[0][0][2] = engine.add({0: raw_a[0]}, {0: {2: a[1][2]}})[0][2]
+    got += [engine.step({0: raw_a[i], 1: raw_b[i]}) for i in range(1, 5)]
+    _assert_tracked_like(want[0], {i: g[0] for i, g in enumerate(got)}, objects=2, frames=5)
+    _assert_tracked_like(want[1], {i: g[1] for i, g in enumerate(got)}, objects=1, frames=5)
 
 
 def test_edges(pred, tmp_path):

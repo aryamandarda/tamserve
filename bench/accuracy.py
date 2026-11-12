@@ -16,6 +16,7 @@ os.environ.setdefault("TQDM_DISABLE", "1")
 
 import numpy as np
 import torch
+from PIL import Image
 
 import davis
 import meta_sam2
@@ -37,6 +38,9 @@ def main():
     ap.add_argument("--compile", default="off",
                     help="'best' for Engine(compile=True), a torch.compile mode, or 'off' (the stock reference "
                          "stays uncompiled)")
+    ap.add_argument("--frames", default="prepared", choices=["prepared", "raw"],
+                    help="prepared: resized on the CPU by prepare(), as stock resizes; raw: handed to the engine "
+                         "as decoded, which resizes them on its device")
     ap.add_argument("--out", default="results/accuracy.jsonl")
     args = ap.parse_args()
 
@@ -59,11 +63,15 @@ def main():
     engine = Engine(pred, bf16=bf16, compile={"off": False, "best": True}.get(args.compile, args.compile))
     got = {s: {} for s in seqs}
     engine_s, live_counts = 0.0, []
+    if args.frames == "raw":
+        load = lambda path: np.asarray(Image.open(path).convert("RGB"))
+    else:
+        load = lambda path: prepare(path, device=engine.device)
     steps = max(start[s] + len(paths[s]) for s in seqs)
     with ThreadPoolExecutor(16) as pool:
         for k in range(steps):
             live = [s for s in seqs if start[s] <= k < start[s] + len(paths[s])]
-            frames = dict(zip(live, pool.map(lambda s: prepare(paths[s][k - start[s]], device=engine.device), live)))
+            frames = dict(zip(live, pool.map(lambda s: load(paths[s][k - start[s]]), live)))
             joining = {s: seeds[s] for s in live if k == start[s]}
             t = clock(engine.device)
             out = engine.step(frames, joining)
@@ -93,6 +101,7 @@ def main():
         "model": args.model,
         "stock": args.stock,
         "compile": args.compile,
+        "frames": args.frames,
         "cameras": len(rows),
         "steps": steps,
         "live_cameras_mean": round(float(np.mean(live_counts)), 1),

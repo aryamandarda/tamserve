@@ -75,27 +75,47 @@ The first time you load a model, tamserve downloads it into `~/.cache/tamserve`,
 
 ### A live loop
 
-tamserve does not open cameras, and it does not run a loop of its own. Your program reads frames however it likes and calls `engine.step()` once per round. This example uses OpenCV to read two network cameras:
+tamserve does not open cameras, and it does not run a loop of its own. Your program reads frames however it likes and calls `engine.step()` once per round, with the newest frame from each camera exactly as the decoder gives it. This example uses OpenCV to read two network cameras:
 
 ```python
+import threading
+
 import cv2  # pip install opencv-python; any source of frames will do
-from tamserve import Box, Engine, build_video_predictor, prepare
+from tamserve import Box, Engine, build_video_predictor
+
+
+class Camera:
+    """Reads one stream on a thread of its own and keeps its newest frame."""
+
+    def __init__(self, url):
+        self.stream, self.newest, self.arrived = cv2.VideoCapture(url), None, threading.Event()
+        threading.Thread(target=self.read, daemon=True).start()
+
+    def read(self):
+        while True:
+            ok, picture = self.stream.read()
+            if not ok:
+                break  # the stream has ended
+            self.newest = cv2.cvtColor(picture, cv2.COLOR_BGR2RGB)  # OpenCV gives BGR, the engine takes RGB
+            self.arrived.set()
+
+    def take(self):
+        """Waits for a frame the loop has not seen yet, and returns it."""
+        self.arrived.wait()
+        self.arrived.clear()
+        return self.newest
+
 
 engine = Engine(build_video_predictor("cuda"))  # loads EdgeTAM onto the GPU
-cameras = {"door": cv2.VideoCapture("rtsp://door-camera/stream"),
-           "yard": cv2.VideoCapture("rtsp://yard-camera/stream")}
+cameras = {"door": Camera("rtsp://door-camera/stream"), "yard": Camera("rtsp://yard-camera/stream")}
 
 # What to track and where it is in the first frame: a box as (left, top, right, bottom), in pixels.
 # In a real system this comes from a detector, or from someone drawing on the picture.
 start = {"door": {"courier": Box(410, 120, 560, 480)}}
 
 while True:
-    # 1. Take the latest frame from each camera.
-    frames = {}
-    for name, camera in cameras.items():
-        ok, picture = camera.read()
-        if ok:
-            frames[name] = prepare(cv2.cvtColor(picture, cv2.COLOR_BGR2RGB), device="cuda")
+    # 1. Take the newest frame from each camera.
+    frames = {name: camera.take() for name, camera in cameras.items()}
 
     # 2. One call tracks every object in every one of those frames.
     masks = engine.step(frames, start)
@@ -109,7 +129,9 @@ while True:
 
 Each call to `step()` takes one frame per camera and returns when the masks for those frames are ready. The engine remembers what it is tracking between calls, which is why the box is passed only once. Camera names and object names are yours to choose.
 
-How fast can the loop go? On an RTX 4090 the compiled engine needs about 25 ms per round for eight cameras with one object each, so 40 rounds a second. Reading and resizing the frames takes time on top of that. If your loop falls behind the cameras, read the newest frame and let the older ones go. The engine tracks from whatever frame it is given and does not need to see every one.
+The frames go in exactly as the decoder gives them. The engine uploads them and resizes them on the GPU, which takes about half a millisecond a frame where resizing on the CPU takes 16. The `Camera` class is there for speed too: with a thread per camera, the next round's frames are decoded while the GPU tracks this one. And because a camera keeps only its newest frame, a loop that falls behind skips frames and does not lag. The engine tracks from whatever frame it is given and does not need to see every one.
+
+How fast can the loop go? On an RTX 4090 with the compiled engine, eight 720p cameras and one object each, a loop like this one tracks 273 frames a second from video to masks, which is 34 for every camera. With 1080p cameras it is 238.
 
 ### Pointing at things
 
@@ -154,8 +176,7 @@ engine.add(frames, {"yard": {"dog": Box(300, 380, 420, 470)}})  # frames: the on
 |---|---|
 | a different model | `build_video_predictor("cuda", "sam2.1-tiny")`. The same works with `-small`, `-base-plus` and `-large`. |
 | masks left on the GPU instead of copied to the CPU | `Engine(predictor, gpu_masks=True)` |
-| frames resized on the GPU, to save CPU time | `prepare(image, device="cuda", resize_on_device=True)`, or `prepare_batch` for several at once |
-| masks identical to stock's, bit for bit | `Engine(predictor, exact=True)` |
+| masks identical to stock's, bit for bit | `Engine(predictor, exact=True)`, and pass each frame through `prepare(frame)` first: it resizes on the CPU exactly as stock does, where the engine's own resize on the GPU can be off by 1 in a pixel's value |
 
 ### Compiling for speed
 
@@ -211,7 +232,7 @@ The full account, including what was tried and dropped: [docs/how-it-works.md](d
 
 The machine is an RTX 4090 (24 GB) with an AMD EPYC 9354 limited to 8.8 cores, PyTorch 2.15, CUDA 13.2, bf16 precision.
 
-Speed is measured with synthetic 640x360 frames that are already decoded and sitting on the GPU, one object per camera, once every object's memory is full. The cost of a step depends on tensor shapes, not on what the pixels show, so synthetic frames give the same timings as real ones. The figures are the engine's own; decoding and resizing your video comes on top. Accuracy is measured on DAVIS 2017.
+Speed is measured with synthetic 640x360 frames that are already decoded and sitting on the GPU, one object per camera, once every object's memory is full. The cost of a step depends on tensor shapes, not on what the pixels show, so synthetic frames give the same timings as real ones. The figures are the engine's own; [A live loop](#a-live-loop-from-video-to-masks) starts from video instead. Accuracy is measured on DAVIS 2017.
 
 ### Speed against stock's fastest setup
 
@@ -229,6 +250,19 @@ Stock is compiled the way Meta's `vos_optimized` mode compiles SAM 2 and runs on
 
 Frames per second are summed over cameras. Stock's GPU figure leaves out the 0.75 GB of video each of its processes holds. Past 8 cameras stock was not measured: 16 processes failed to start on the test machine, and 32 or more would not fit in 24 GB.
 
+### A live loop, from video to masks
+
+The table above starts from frames that are already resized and on the GPU. A real loop starts from video. Here the same engine is fed the way the [example loop](#a-live-loop) feeds it: H.264 video read with OpenCV on a thread per camera, and each frame handed to `step()` as decoded. One object per camera, frames per second in total.
+
+| cameras | 720p video | 1080p video | the engine alone |
+|---|---|---|---|
+| 1 | 192 | 175 | 191 |
+| 4 | 288 | 253 | 337 |
+| 8 | 273 | 238 | 330 |
+| 16 | 268 | 236 | 324 |
+
+Decoding costs 1.5 ms a frame at 720p and 2.9 ms at 1080p, and the engine's upload and resize 0.4 and 0.7 ms. Resizing on the CPU instead, the way stock prepares a video, takes 16 and 24 ms a frame, which would hold this loop to about 50 frames/s at 720p and 35 at 1080p however many cameras there are.
+
 ### Accuracy
 
 All 30 DAVIS 2017 validation videos run as cameras that join three frames apart, so every step mixes new and old objects, 10.7 cameras at a time on average. Accuracy is mean overlap (IoU) with the hand-drawn masks. "Lost" counts frames where stock had an object and the engine did not.
@@ -242,6 +276,8 @@ All 30 DAVIS 2017 validation videos run as cameras that join three frames apart,
 | SAM 2.1 large | 0.8919 | 0.8918 | | 0 |
 
 For scale, stock's own accuracy moves by 0.0002 when the only change is whether an object is tracked alone or next to others, because a GPU rounds slightly differently at different batch sizes. Compiling has the same kind of effect: two builds of the compiled EdgeTAM engine scored 0.8685 and 0.8689. Uncompiled runs repeat exactly, and with `exact=True` one camera matches stock bit for bit, on the CPU and the GPU, for both model families and all three kinds of prompt.
+
+The table is for frames resized on the CPU as stock resizes them. Handed raw frames, which it resizes on the GPU, the engine scores the same: 0.8685 for EdgeTAM and 0.8808 for SAM 2.1 tiny, with no objects lost.
 
 ### Memory
 
@@ -279,7 +315,7 @@ What tamserve does not do:
 - **Track backwards.** It only moves forward in time, which is all a live camera needs. Stock can also run backwards from a prompt in a recorded clip.
 - **Adjust a mask without restarting it.** Fixing a track means pointing at the object again, and tracking starts over from there. Stock also lets you add a click that nudges the current mask while keeping its history, and lets you prompt one object on several frames. tamserve has neither.
 - **Find or recognise objects.** Something else has to supply the first prompt. If an object leaves the view, its mask comes back empty, and whether it is picked up again when it returns is up to the model.
-- **Use more than one GPU.** One engine drives one GPU and must be called from one thread. For more GPUs, run an engine on each and split the cameras between them.
+- **Spread cameras over several GPUs for you.** One engine drives one GPU and must be called from one thread. With more GPUs, run one process per GPU and give each its share of the cameras. Two RTX 4090s tracked 707 frames/s that way, twice what one does.
 
 What to expect in practice:
 
@@ -292,7 +328,7 @@ What to expect in practice:
 ```bash
 git clone https://github.com/aryamandarda/tamserve.git && cd tamserve
 uv sync --group dev --group bench
-uv run pytest                                   # 23 tests on a CPU, 29 with a GPU
+uv run pytest                                   # 24 tests on a CPU, 31 with a GPU
 scripts/fetch_davis.sh                          # DAVIS 2017, 833 MB, for the accuracy benchmark
 
 uv run python bench/throughput.py --arms procs-compiled --procs 1,2,4,8                    # stock
@@ -300,6 +336,7 @@ uv run python bench/throughput.py --arms engine-procs --procs 1 --sizes 1,2,4,8,
 uv run python bench/accuracy.py --compile best     # add --model sam2.1-tiny and so on
 uv run python bench/memory.py
 uv run python bench/engine_profile.py --stages
+uv run --with opencv-python-headless python bench/live.py --video your-video.mp4   # the live loop
 
 uv pip install sam2                                # Meta's current SAM 2 code, for the SAM 2.1 comparison
 uv run python bench/throughput.py --model sam2.1-tiny --stock sam2 --arms procs-compiled --procs 1,2,4,8
@@ -316,7 +353,7 @@ The stock arms need NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark 
 | [`src/tamserve/models.py`](src/tamserve/models.py) | fetching, checking and loading EdgeTAM and SAM 2.1 |
 | [`src/tamserve/reference.py`](src/tamserve/reference.py), [`compare.py`](src/tamserve/compare.py) | the stock predictor as a reference, and mask comparison |
 | [`tests/`](tests/) | bit-for-bit checks against stock; objects joining, leaving and restarting |
-| [`bench/`](bench/) | the five scripts behind every number here |
+| [`bench/`](bench/) | the six scripts behind every number here |
 | [`docs/`](docs/) | how it works, and all results |
 
 | read more | what it covers |

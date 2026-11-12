@@ -190,8 +190,21 @@ of that model's -0.0004.
 
 `pytest` (`tests/test_engine.py`): with `Engine(exact=True)` one camera gives
 masks identical to stock's on every frame, on the CPU and the GPU, for EdgeTAM
-and SAM 2.1 tiny, for mask, box and click prompts. 28 tests passed on the GPU
-machine; 23 run without a GPU.
+and SAM 2.1 tiny, for mask, box and click prompts. 31 tests pass with a GPU; 24
+run without one.
+
+### Raw frames
+
+Everything above feeds the engine frames resized on the CPU by `prepare()`,
+exactly as stock resizes them. A frame handed to `step()` as decoded is resized
+by the engine on the GPU instead, and a pixel can then differ from stock's by 1
+(`bench/accuracy.py --frames raw`):
+
+| model | stock | tamserve, frames from `prepare()` | tamserve, raw frames | lost |
+|---|---|---|---|---|
+| EdgeTAM | 0.8686 | 0.8684 | 0.8685 | 0 |
+| EdgeTAM, `compile=True` | 0.8686 | 0.8685 | 0.8682 | 0 |
+| SAM 2.1 tiny | 0.8807 | 0.8807 | 0.8808 | 0 |
 
 ## Memory
 
@@ -317,6 +330,70 @@ the limit for both. What tamserve changes is memory, which stays put as cameras
 are added and as time passes, and the interface: frames arrive one at a time
 from live cameras instead of from a video loaded in full.
 
+## A live loop
+
+`bench/live.py`. The throughput tables start from frames that are already
+resized and on the GPU. This starts from video: a 30 frames/s H.264 file read
+with OpenCV stands in for each camera, one object per camera, EdgeTAM compiled.
+Measured on a second machine, an RTX 4090 with an AMD EPYC 9684X.
+
+What one frame costs before the engine sees it:
+
+| | 720p | 1080p |
+|---|---|---|
+| decoding | 1.5 ms | 2.9 ms |
+| resizing on the CPU with `prepare()`, as stock does | 16.0 ms | 23.5 ms |
+| the engine's own upload and resize, 8 frames together | 0.44 ms | 0.73 ms |
+
+The engine copies a round's raw frames into one buffer of page-locked memory,
+uploads them in one go and resizes them on the GPU, following PIL step for step
+so that pixels match `prepare()`'s or differ by 1.
+
+Frames per second from video to masks, summed over cameras, 720p:
+
+| cameras | `prepare()` in the loop | raw frames | raw frames, a decoding thread per camera | the engine alone |
+|---|---|---|---|---|
+| 1 | 43 | 150 | 192 | 191 |
+| 4 | 48 | 210 | 288 | 337 |
+| 8 | 51 | 215 | 273 | 330 |
+| 16 | 50 | 206 | 268 | 324 |
+
+and 1080p:
+
+| cameras | `prepare()` in the loop | raw frames | raw frames, a decoding thread per camera | the engine alone |
+|---|---|---|---|---|
+| 1 | 31 | 136 | 175 | 191 |
+| 4 | 34 | 161 | 253 | 339 |
+| 8 | 35 | 138 | 238 | 328 |
+| 16 | 35 | 146 | 236 | 321 |
+
+In the first two columns every frame is decoded in the loop, one after another.
+In the third each camera has a thread that decodes its next frame while the
+current round is tracked, which is what the README's example does. "The engine
+alone" tracks frames that were prepared beforehand.
+
+Frames that are already resized but still in host memory cost the engine 12 to
+14% when it uploads them (355 down to about 305 frames/s at 8 cameras on the
+two-GPU machine below). Uploading each one before the step, or through a
+page-locked buffer, won back a few percent at most.
+
+## Two GPUs
+
+Two RTX 4090s in one machine with an AMD Ryzen 9 7950X. EdgeTAM compiled, one
+object per camera, frames already on the GPU, frames per second in total:
+
+| cameras per GPU | one GPU | two GPUs, one process each |
+|---|---|---|
+| 4 | 371 | 739 |
+| 8 | 355 | 707 |
+| 16 | 355 | 708 |
+
+`CUDA_VISIBLE_DEVICES=0 python bench/throughput.py --arms engine-procs --procs 1 --sizes 4,8,16`,
+and the same with `=1` at the same time. Each process then sees its GPU as the
+first one and reuses the code the other compiled, so the second starts in 42
+seconds. A GPU addressed as `cuda:1` inside one process compiles everything
+again (813 seconds).
+
 ## Waiting inside a step
 
 How often the CPU stops until the GPU has finished everything queued, in one
@@ -346,3 +423,5 @@ masks to the CPU.
 | sharing the first self-attention across one camera's objects | exact, and 1.3x on memory attention with 10 objects per camera, but about 7% of such a step, for a copy of stock's attention loop. Not built. |
 | folding the image encoder's branches and batch norms together | 13% faster, accuracy down 0.0022, one object lost |
 | channels-last layout with cuDNN autotuning | 3% faster at a fixed batch size, slower when it changes; accuracy down 0.0013, two objects lost |
+| two engines in one process, a thread each, for two GPUs | 1.3 to 1.6 times one GPU where two processes give 2: the threads take turns at Python's interpreter. Two engines compiling at once also stopped each other for good, on a lock inside PyTorch's autocast. |
+| one engine per process, fed frames through a pipe, for two GPUs | 327 frames/s on two GPUs against 355 on one: every frame is copied on its way to the other process |

@@ -172,6 +172,26 @@ EdgeTAM's image encoder does the least GPU work per frame when it is given 4
 frames at a time, but every call has to be launched. Up to 8 frames go in one
 call; more are cut into pieces of 4.
 
+### Getting frames in
+
+Everything above starts from a frame that is already resized and on the GPU. A
+live loop starts from a decoder, and what happens in between can cost more than
+the tracking: resizing a 720p frame to the model's 1024 x 1024 on the CPU takes
+16 ms, five times what the engine needs to track it.
+
+So `step()` takes frames as the decoder gives them. The engine copies a round's
+frames into one buffer of page-locked memory (memory the system will not move,
+so the GPU can read it directly), uploads them in one go, and resizes them on
+the GPU: 0.44 ms a frame at 720p. The resize follows PIL's step for step
+(bicubic, width then height, rounded in between), so every pixel matches stock's
+or differs by 1, and accuracy does not change ([results.md](results.md#raw-frames)).
+`prepare()` still does stock's exact resize on the CPU, for when masks must
+match stock's bit for bit.
+
+Decoding stays with the caller. It is best done on a thread per camera, so that
+the next round's frames are decoded while the GPU tracks this one
+([results.md](results.md#a-live-loop)).
+
 ### Where the time goes
 
 EdgeTAM on an RTX 4090, compiled, one object per camera, per camera per step:
@@ -225,7 +245,8 @@ or that anyone can write to. The code is stored under the package name
 - The engine follows what it is told to follow. It does not find objects, and if
   one leaves the view its mask comes back empty until the model picks it up
   again, if it does.
-- One engine drives one GPU and is called from one thread.
+- One engine drives one GPU and is called from one thread. For several GPUs, run
+  one process per GPU ([results.md](results.md#two-gpus)).
 - The timings are from one RTX 4090. The two tuning choices made from them, CUDA
   graphs for calls of one or two rows and encoder pieces of 4, are safe on any
   GPU but may not be the fastest choice on another.

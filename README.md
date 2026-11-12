@@ -193,7 +193,7 @@ Later starts are quick because PyTorch keeps the compiled code on disk. By defau
 
 ### Several GPUs
 
-One engine drives one GPU. For a machine with several, use a `Router`. It starts a worker on each GPU, puts each camera on the one with the most room, and gives you every camera's results in one place. Each worker opens and decodes its own cameras, so video never travels between them.
+One engine drives one GPU. For several, on one machine or many, use a `Router`. It runs a worker on each GPU, puts each camera on the one with the most room, and gives you every camera's results in one place. Each worker opens and decodes its own cameras, so video never travels between them.
 
 ```python
 from tamserve import Box, Router
@@ -219,6 +219,30 @@ The router reads the cameras itself, so you give it each camera's address instea
 Masks arrive in a compact form, a few KB each instead of a full grid of pixels. `mask.box` and `mask.area` are ready to use, and `mask.array()` gives the full True/False grid when you need it. Each update also carries the frame's number. If a person or a detector pointed at something on a frame the router has already moved past, pass that number as `start(..., frame=n)`: the worker starts the object on that frame and catches it up through the frames it kept.
 
 On two RTX 4090s, with one object per camera, a router tracked 476 frames a second from 32 cameras of 720p video, against 241 on one GPU. Below what the GPUs can do, every camera is tracked at its full 30 frames a second and masks reach the router 20 ms after the frame was decoded.
+
+#### GPUs on other machines
+
+On each machine with GPUs, start one worker per GPU. A worker builds and compiles its engine once, then waits for a router to connect:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))" > token   # once; copy the same file to every machine
+tamserve worker --gpu 0 --listen 0.0.0.0:7300 --token-file token --compile
+tamserve worker --gpu 1 --listen 0.0.0.0:7301 --token-file token --compile
+```
+
+Your program then lists the workers' addresses, and nothing else in it changes. Addresses and this machine's own GPUs can be mixed:
+
+```python
+router = Router(workers=["10.0.0.11:7300", "10.0.0.11:7301", "10.0.0.12:7300"], token=open("token").read())
+```
+
+A few things to know:
+
+- **The workers open the cameras**, so each camera's address has to be reachable from the worker machines, not just from your program. Cameras on a worker machine are given by address (`rtsp://...`), not as a reader function.
+- **Keep workers on a private network or a VPN** such as Tailscale or WireGuard, or reach them through an SSH tunnel. The token keeps strangers from connecting: router and worker each prove they know it, without sending it. But the traffic is not encrypted, and camera addresses often carry the camera's password. Messages are plain data, so a worker never runs anything it is sent.
+- **One router per worker at a time.** When the router disconnects, for example because your program restarted, the worker forgets its cameras and waits for the next one.
+
+Measured with two machines, one in California and one in Utah, each with an RTX 4090 and 16 RTSP cameras at 720p: a router on the California machine tracked 494 frames a second from all 32, which is 98% of what the two did on their own. Below capacity, every camera was tracked at its full 30 frames a second, and masks from the Utah machine arrived 21 ms after those from the local one.
 
 ## How it works
 
@@ -345,7 +369,6 @@ What tamserve does not do:
 - **Track backwards.** It only moves forward in time, which is all a live camera needs. Stock can also run backwards from a prompt in a recorded clip.
 - **Adjust a mask without restarting it.** Fixing a track means pointing at the object again, and tracking starts over from there. Stock also lets you add a click that nudges the current mask while keeping its history, and lets you prompt one object on several frames. tamserve has neither.
 - **Find or recognise objects.** Something else has to supply the first prompt. If an object leaves the view, its mask comes back empty, and whether it is picked up again when it returns is up to the model.
-- **Use GPUs on other machines.** A router spreads cameras over the GPUs of the machine it runs on.
 
 What to expect in practice:
 
@@ -368,6 +391,7 @@ uv run python bench/memory.py
 uv run python bench/engine_profile.py --stages
 uv run --with opencv-python-headless python bench/live.py --video your-video.mp4   # the live loop
 uv run --with opencv-python-headless python bench/router.py --video your-video.mp4 --gpus 0,1   # several GPUs
+# and over other machines: --workers host:port,... --token-file token --source rtsp://camera-address
 
 uv pip install sam2                                # Meta's current SAM 2 code, for the SAM 2.1 comparison
 uv run python bench/throughput.py --model sam2.1-tiny --stock sam2 --arms procs-compiled --procs 1,2,4,8
@@ -381,7 +405,7 @@ The stock arms need NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark 
 | path | what is there |
 |---|---|
 | [`src/tamserve/engine.py`](src/tamserve/engine.py) | the engine: batching, per-object memory, compiling |
-| [`src/tamserve/router.py`](src/tamserve/router.py), [`worker.py`](src/tamserve/worker.py) | cameras spread over several GPUs: placing them, and the worker on each GPU |
+| [`src/tamserve/router.py`](src/tamserve/router.py), [`worker.py`](src/tamserve/worker.py), [`wire.py`](src/tamserve/wire.py) | cameras spread over several GPUs: placing them, the worker on each GPU, and how router and workers on other machines talk |
 | [`src/tamserve/models.py`](src/tamserve/models.py) | fetching, checking and loading EdgeTAM and SAM 2.1 |
 | [`src/tamserve/reference.py`](src/tamserve/reference.py), [`compare.py`](src/tamserve/compare.py) | the stock predictor as a reference, and mask comparison |
 | [`tests/`](tests/) | bit-for-bit checks against stock; objects joining, leaving and restarting |

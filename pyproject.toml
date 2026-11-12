@@ -22,9 +22,12 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/aryamandarda/tamserve"
 
+[project.scripts]
+tamserve = "tamserve.worker:main"
+
 [dependency-groups]
-dev = ["pytest>=8"]
-bench = ["psutil"]
+dev = ["pytest>=8", "opencv-python-headless>=4.8"]  # OpenCV: the router tests read cameras by address
+bench = ["psutil", "opencv-python-headless>=4.8"]
 
 [build-system]
 requires = ["hatchling"]

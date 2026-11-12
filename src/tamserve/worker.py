@@ -1,53 +1,31 @@
 """A worker: one engine on one GPU, the cameras placed on it, and the loop that
 tracks them. A Router starts one per GPU and talks to it in small messages, commands
-in and compact masks out, so video never leaves the worker that decodes it."""
+in and compact masks out, so video never leaves the worker that decodes it.
+
+`tamserve worker` runs one as a service on another machine, for a Router to reach
+over the network (main(), below)."""
 from __future__ import annotations
 
+import argparse
+import os
+import sys
 import threading
 import time
 import traceback
 from collections import deque
-from typing import NamedTuple
+from multiprocessing.connection import Listener
+from pathlib import Path
 
 import numpy as np
 import torch
 
+from tamserve import wire
 from tamserve.engine import Engine
-from tamserve.models import build_video_predictor
+from tamserve.models import MODELS, build_video_predictor
+from tamserve.wire import Mask, Update
 
 _COMMANDS = ("add_camera", "remove_camera", "start", "stop")
 _ASIDE = "tamserve: catching up"  # the camera id an object is followed under while it catches up
-
-
-class Mask(NamedTuple):
-    """One object's mask, stored as runs of equal pixels, row by row: `ends` holds
-    where each run but the last ends, `first` is the first run's value. A few KB for
-    a typical object, where the full mask of a 1080p frame is 2 MB."""
-    shape: tuple        # (height, width)
-    first: bool
-    ends: np.ndarray
-    box: tuple | None   # (left, top, right, bottom) around the object, right and bottom exclusive; None if empty
-    area: int           # pixels on the object
-
-    def array(self) -> np.ndarray:
-        """The mask as an H x W bool array, True on the object."""
-        h, w = self.shape
-        bounds = np.concatenate(([0], self.ends, [h * w]))
-        values = np.zeros(len(bounds) - 1, dtype=bool)
-        values[0 if self.first else 1::2] = True
-        return np.repeat(values, np.diff(bounds)).reshape(h, w)
-
-
-class Update(NamedTuple):
-    """One frame of one camera: the masks of the objects tracked on it, by name. An
-    object started on an earlier frame also sends its masks for the frames between,
-    so one frame can arrive in more than one Update."""
-    camera: object
-    frame: int | None     # the frame's number on its camera, counted from 0
-    time: float | None    # when the frame was decoded, as time.time() gives it
-    masks: dict
-    error: str | None = None
-    ended: bool = False   # the camera's stream has ended and all of it has been tracked
 
 
 def encode(masks: dict) -> dict:
@@ -178,12 +156,29 @@ class _Worker:
         self.since, self.spent = time.perf_counter(), 0.0
 
     def run(self, commands):
+        """Serves the router until it says close or goes away, then forgets everything."""
+        try:
+            self._serve(commands)
+        except (EOFError, OSError, TimeoutError):
+            pass  # the router has gone
+        except ValueError as e:
+            print(f"tamserve worker: {e}; ending this router's session", file=sys.stderr, flush=True)
+        finally:
+            self.forget()
+
+    def forget(self):
+        for cam in self.cameras.values():
+            cam.stop()
+        for camera in {c for c, _ in self.engine.tracks}:
+            self.engine.drop(camera)
+        self.cameras.clear()
+        self.waiting.clear()
+
+    def _serve(self, commands):
         while True:
             while commands.poll():
                 name, *args = commands.recv()
                 if name == "close":
-                    for cam in self.cameras.values():
-                        cam.stop()
                     return
                 try:
                     if name not in _COMMANDS:
@@ -280,3 +275,69 @@ class _Worker:
     def _send(self, updates):
         if updates:
             self.events.send(("updates", updates))
+
+
+class _Wire:
+    """A connection to a router on another machine, carrying plain data (tamserve.wire)."""
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def poll(self, timeout=0):
+        return self.conn.poll(timeout)
+
+    def recv(self):
+        return wire.recv(self.conn)
+
+    def send(self, message):
+        wire.send(self.conn, message)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="tamserve")
+    sub = ap.add_subparsers(dest="command", required=True)
+    w = sub.add_parser("worker", help="track cameras on one GPU for a Router on another machine")
+    w.add_argument("--listen", default="127.0.0.1:7300",
+                   help="address and port to listen on; 0.0.0.0:7300 listens on every network this machine is on")
+    w.add_argument("--token-file", required=True, help="a file holding the secret a router must know to connect")
+    w.add_argument("--gpu", type=int, help="which GPU to use, counted from 0; the first if left out")
+    w.add_argument("--device", default="cuda", choices=["cuda", "cpu"], help="cpu is for trying it out")
+    w.add_argument("--model", default="edgetam", choices=sorted(MODELS))
+    w.add_argument("--compile", nargs="?", const="best", default=None,
+                   help="compile for speed: on its own for the fastest setup, or a torch.compile mode")
+    w.add_argument("--keep", type=int, default=32, help="frames each camera keeps, for prompts on frames already passed")
+    args = ap.parse_args(argv)
+    if args.gpu is not None:  # before CUDA starts: this process then sees only that GPU
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    token = Path(args.token_file).read_bytes().strip()
+    if len(token) < 16:
+        sys.exit('tamserve worker: the token must be at least 16 characters; make one with '
+                 'python -c "import secrets; print(secrets.token_hex(32))"')
+    host, _, port = args.listen.rpartition(":")
+    compile = {None: False, "best": True}.get(args.compile, args.compile)
+    engine = Engine(build_video_predictor(args.device, args.model), gpu_masks=args.device != "cpu", compile=compile)
+    gpu = torch.cuda.get_device_name() if args.device == "cuda" else "cpu"
+    about = {"model": args.model, "compiled": bool(compile), "device": gpu}
+    listener = Listener((host, int(port)), family="AF_INET")
+    print(f"tamserve worker: {args.model} on {gpu}, listening on {host}:{port}", flush=True)
+    while True:
+        conn = listener.accept()
+        peer = listener.last_accepted[0]
+        try:
+            wire.prove_worker(conn, token)
+            kind, _ = wire.recv(conn, timeout=10)
+            if kind != "hello":
+                raise ValueError("the router did not say hello")
+            wire.send(conn, ("ready", {**about, "time": time.time()}))
+        except (PermissionError, TimeoutError, ValueError, EOFError, OSError) as e:
+            print(f"tamserve worker: refused a connection from {peer}: {e}", file=sys.stderr, flush=True)
+            conn.close()
+            continue
+        print(f"tamserve worker: router connected from {peer}", flush=True)
+        _Worker(engine, _Wire(conn), args.keep).run(_Wire(conn))
+        conn.close()
+        print("tamserve worker: router gone; its cameras are forgotten", flush=True)
+
+
+if __name__ == "__main__":
+    main()

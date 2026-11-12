@@ -215,6 +215,26 @@ its memory holds 8 times as many tokens per frame, memory attention dominates,
 and the GPU is already the limit at one camera, so batching cameras cannot raise
 its frame rate ([results.md](results.md#sam-21)).
 
+## Several GPUs
+
+A `Router` places cameras on workers, one per GPU, and a camera stays where it is
+put, because its objects' memory lives on that GPU. Each worker opens and decodes
+its own cameras: moving decoded frames between processes cost more than tracking
+them. The router sends commands and receives masks stored as runs of equal pixels,
+a few KB each. A new camera goes to the worker with the most room, judged by how
+busy each worker says its GPU was over the last second.
+
+Workers on this machine are child processes, each seeing only its own GPU so that
+all of them reuse the code the first compiled. A worker on another machine is a
+`tamserve worker` reached over TCP. Before anything else, router and worker each
+prove they know a shared token, by answering a random challenge with an HMAC-SHA256
+of it, so the token never crosses the network. After that every message is plain
+data: a JSON description and the raw bytes of any arrays in it. Only plain values
+and tamserve's own types (Box, Clicks, Mask, Update) can be rebuilt from a message,
+so neither side ever runs anything the other sent. The router also compares its
+clock with each worker's when it connects, so the times on updates are on its own
+clock wherever the frame was decoded.
+
 ## Where the model code comes from
 
 EdgeTAM is not published as a package, so on first use tamserve downloads its
@@ -252,8 +272,10 @@ or that anyone can write to. The code is stored under the package name
   one leaves the view its mask comes back empty until the model picks it up
   again, if it does.
 - One engine drives one GPU and is called from one thread. A `Router` spreads
-  cameras over the GPUs of one machine, a worker process on each
+  cameras over several GPUs, on one machine or many, a worker on each
   ([results.md](results.md#through-a-router)).
+- Router and remote workers authenticate each other but do not encrypt their
+  traffic; run them on a private network or a VPN.
 - The timings are from one RTX 4090. The two tuning choices made from them, CUDA
   graphs for calls of one or two rows and encoder pieces of 4, are safe on any
   GPU but may not be the fastest choice on another.

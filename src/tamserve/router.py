@@ -1,20 +1,24 @@
 """Cameras over several GPUs, used through one object.
 
-A Router starts a worker process per GPU (tamserve.worker) and puts each camera on
-the one with the most room, where it stays: its objects' memory lives on that GPU.
-Workers open and decode their own cameras, so video never passes between processes;
-the router sends them commands and receives compact masks.
+A Router puts each camera on the worker with the most room, where it stays: its
+objects' memory lives on that GPU. Workers open and decode their own cameras, so
+video never passes between processes; the router sends them commands and receives
+compact masks. A worker is either a process the router starts on a GPU of this
+machine, or a `tamserve worker` on another machine, reached over the network.
 """
 from __future__ import annotations
 
 import os
 import queue
 import threading
-from multiprocessing.connection import wait
+import time
+from multiprocessing.connection import Client, wait
 
 import torch
 
-from tamserve.worker import Update, serve
+from tamserve import wire
+from tamserve.wire import Update
+from tamserve.worker import serve
 
 _ENVIRON = threading.Lock()
 
@@ -33,8 +37,9 @@ def _visible(device):
     return ids[index], "cuda"
 
 
-class _Worker:
-    """A worker process, as the router sees it."""
+class _Local:
+    """A worker process on this machine, which the router starts."""
+    remote = False
 
     def __init__(self, device, model, options, keep):
         ctx = torch.multiprocessing.get_context("spawn")
@@ -68,39 +73,120 @@ class _Worker:
             raise RuntimeError(f"the worker for {self.device} did not start: {detail}")
         self.alive = True
 
+    def fileno(self):
+        return self.events.fileno()
+
+    def recv(self):
+        return self.events.recv()
+
     def send(self, *command):
         with self.lock:
             if not self.alive:
                 raise RuntimeError(f"the worker for {self.device} has stopped")
             self.commands.send(command)
 
+    def close(self):
+        try:
+            self.send("close")
+        except (RuntimeError, OSError):
+            pass
+        self.process.join(timeout=10)
+        if self.process.is_alive():
+            self.process.terminate()
+
+
+class _Remote:
+    """A `tamserve worker` on another machine, reached over the network."""
+    remote = True
+
+    def __init__(self, address, token, model):
+        host, _, port = address.rpartition(":")
+        self.device, self.conn = address, Client((host, int(port)), family="AF_INET")
+        try:
+            wire.prove_router(self.conn, token)
+            sent = time.time()
+            wire.send(self.conn, ("hello", sent))
+            kind, about = wire.recv(self.conn, timeout=30)
+            back = time.time()
+            if kind != "ready":
+                raise RuntimeError(f"the worker at {address} did not get ready")
+            if about["model"] != model:
+                raise ValueError(f"the worker at {address} runs {about['model']}, not {model}")
+        except BaseException:
+            self.conn.close()
+            raise
+        # How far its clock is ahead of ours, to the precision of half the round trip:
+        # Update.time is then on this machine's clock, wherever the frame was decoded.
+        self.offset = about["time"] - (sent + back) / 2
+        self.about, self.cameras, self.busy, self.counted = about, set(), 0.0, 0
+        self.alive, self.lock = True, threading.Lock()
+
+    def ready(self):
+        pass  # a remote worker builds its engine when it starts, before anyone connects
+
+    def fileno(self):
+        return self.conn.fileno()
+
+    def recv(self):
+        message = wire.recv(self.conn)
+        if message[0] == "updates":
+            message = ("updates", [u._replace(time=u.time - self.offset) if u.time is not None else u
+                                   for u in message[1]])
+        return message
+
+    def send(self, *command):
+        with self.lock:
+            if not self.alive:
+                raise RuntimeError(f"the worker at {self.device} has stopped")
+            wire.send(self.conn, command)
+
+    def close(self):
+        try:
+            self.send("close")
+        except (RuntimeError, OSError):
+            pass
+        self.conn.close()
+
 
 class Router:
-    """Cameras spread over this machine's GPUs, used through one object.
+    """Cameras spread over GPUs, used through one object.
 
-    workers: "local" for a worker on every GPU this process can see, or a list of
-        devices, such as ["cuda:0", "cuda:2"] or ["cpu", "cpu"].
-    keep: frames each camera keeps, for prompts made on a frame its worker has
-        already passed (start(..., frame=n)).
-    Every other argument goes to each worker's Engine, such as compile=True.
+    workers: "local" for a worker on every GPU this process can see, or a list in
+        which each entry is a device of this machine, such as "cuda:0" or "cpu",
+        or the address of a `tamserve worker` on another machine, such as
+        "10.0.0.12:7300". The two can be mixed.
+    token: the secret the workers on other machines were started with.
+    keep: frames each camera on this machine's workers keeps, for prompts made on
+        a frame its worker has already passed (start(..., frame=n)). Workers on
+        other machines take it as a command-line option.
+    Every other argument goes to the Engine of each worker on this machine, such
+    as compile=True; workers on other machines are set up when they start.
 
-    Create it under `if __name__ == "__main__":`. Workers are new Python processes,
-    and they import your main module as they start.
+    Create it under `if __name__ == "__main__":`. Workers on this machine are new
+    Python processes, and they import your main module as they start.
     """
 
-    def __init__(self, model: str = "edgetam", workers="local", *, keep: int = 32, **options):
+    def __init__(self, model: str = "edgetam", workers="local", *, token: str | bytes | None = None,
+                 keep: int = 32, **options):
         if workers == "local":
             workers = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
             if not workers:
                 raise ValueError("no GPU is visible; pass workers=['cpu'] to run on the CPU")
+        local = [w for w in workers if w.partition(":")[0] in ("cpu", "cuda", "mps")]
+        remote = [w for w in workers if w not in local]
+        if remote and not token:
+            raise ValueError("workers on other machines need the token they were started with")
+        token = (token.encode() if isinstance(token, str) else token or b"").strip()
         self.home: dict = {}  # camera -> index of its worker
         self._updates: queue.Queue = queue.Queue()
         self._workers: list = []
         self._closing, self._reader = False, None
         try:
-            # Compiling, the first worker goes alone and the others start from its compiled code.
-            for group in ([workers[:1], workers[1:]] if options.get("compile") else [workers]):
-                started = [_Worker(d, model, options, keep) for d in group]
+            for address in remote:
+                self._workers.append(_Remote(address, token, model))
+            # Compiling, the first local worker goes alone and the others start from its compiled code.
+            for group in ([local[:1], local[1:]] if options.get("compile") else [local]):
+                started = [_Local(d, model, options, keep) for d in group]
                 self._workers += started
                 for w in started:
                     w.ready()
@@ -114,10 +200,12 @@ class Router:
         """Start reading a camera, on the worker with the most room; returns its index.
 
         source: an address OpenCV can open (rtsp://..., a file), which needs
-            opencv-python; or something the worker can call to get a reader, whose
-            read() returns the next frame as an H x W x 3 uint8 RGB array and None at
-            the end. It is sent to the worker, so it must be picklable: a function or
-            class defined at the top of a module, or functools.partial of one.
+            opencv-python where the worker runs. It is opened by the worker, so it
+            must be reachable from that machine. A worker on this machine also
+            takes something it can call to get a reader, whose read() returns the
+            next frame as an H x W x 3 uint8 RGB array and None at the end. That is
+            sent to the worker, so it must be picklable: a function or class defined
+            at the top of a module, or functools.partial of one.
         skip: when tracking falls behind the camera, take its newest frame and skip
             the rest, as a live camera needs. False tracks every frame, as for a
             recorded video.
@@ -125,6 +213,8 @@ class Router:
         if camera in self.home:
             raise KeyError(f"camera {camera!r} is already added")
         i = self._place()
+        if self._workers[i].remote and not isinstance(source, str):
+            raise TypeError("a camera on another machine is given by its address, not by a reader")
         self._workers[i].send("add_camera", camera, source, skip)
         self.home[camera] = i
         self._workers[i].cameras.add(camera)
@@ -167,17 +257,10 @@ class Router:
             yield update
 
     def close(self) -> None:
-        """Stops every worker and waits for them to exit."""
+        """Lets go of every worker: this machine's stop, other machines' forget its cameras."""
         self._closing = True
         for w in self._workers:
-            try:
-                w.send("close")
-            except (RuntimeError, OSError):
-                pass
-        for w in self._workers:
-            w.process.join(timeout=10)
-            if w.process.is_alive():
-                w.process.terminate()
+            w.close()
         if self._reader is not None:
             self._reader.join(timeout=5)
         else:
@@ -207,14 +290,13 @@ class Router:
 
     def _read(self):
         """Moves every worker's messages to the queue results() reads from."""
-        reading = {w.events: w for w in self._workers}
+        reading = set(self._workers)
         while reading:
-            for conn in wait(list(reading)):
-                w = reading[conn]
+            for w in wait(list(reading)):
                 try:
-                    kind, *rest = conn.recv()
-                except (EOFError, OSError):
-                    del reading[conn]
+                    kind, *rest = w.recv()
+                except (EOFError, OSError, ValueError):
+                    reading.discard(w)
                     with w.lock:
                         w.alive = False
                     if not self._closing:

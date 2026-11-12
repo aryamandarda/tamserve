@@ -427,6 +427,36 @@ held both GPUs to 55 frames/s, against 343 with one thread each, and the other
 rows rose by 4 to 11%. (The first and third rows were measured before that
 change; at 16 cameras of 720p it made no difference.)
 
+### Across machines
+
+Two machines, each with one RTX 4090: A, with an AMD EPYC 9684X in California,
+and B, with an AMD EPYC 7C13 in Utah. Each ran `tamserve worker --compile`
+listening on its own machine only; the router ran on A and reached B's worker
+through an SSH tunnel. The cameras were real RTSP streams: MediaMTX on each
+machine served the 720p and 1080p clips in a loop at 30 frames/s, and each worker
+opened them on its own machine, as cameras on each site would be. One object per
+camera; delay is from a frame being decoded to its masks reaching the router on
+A, with B's clock matched to A's when it connected.
+
+| video | workers | cameras | frames/s | each camera | delay, median |
+|---|---|---|---|---|---|
+| 720p | A | 16 | 267 | 16.7 | 78 ms |
+| 720p | B, from A | 16 | 236 | 14.7 | 105 ms |
+| 720p | A and B | 32 | 494 | 15.4 | 79 ms on A, 107 ms on B |
+| 720p | A and B | 12 | 358 | 30, all of them | 18.5 ms on A, 39.6 ms on B |
+| 1080p | A | 16 | 229 | 14.3 | 87 ms |
+| 1080p | A and B | 32 | 400 | 12.5 | 89 ms on A, 123 ms on B |
+
+Together the two machines did 98% of what they did separately at 720p (494
+against 267 + 236). B's results took about 21 ms longer to arrive, the trip from
+Utah to California through the tunnel; the rest of B's extra delay at full load
+is its slower rounds. At 1080p two machines beat two GPUs in one machine (400
+against 343), because each decodes only its own cameras. The router was ready in
+a tenth of a second: a remote worker compiles once, when it starts.
+
+`bench/router.py --workers 127.0.0.1:7300,127.0.0.1:7301 --token-file token --source rtsp://127.0.0.1:8554/cam{i}`
+on A. 38 tests passed on A.
+
 ## Waiting inside a step
 
 How often the CPU stops until the GPU has finished everything queued, in one

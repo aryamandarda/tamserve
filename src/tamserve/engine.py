@@ -12,6 +12,7 @@ are 16 frames in, that is all of them.
 """
 from __future__ import annotations
 
+import gc
 from collections import deque
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -330,6 +331,11 @@ class Engine:
         hw = {c: tuple(frames[c][1]) for c in busy}
         # Stock takes all of a video's objects in one pass, whatever their number.
         cap = len(starting) + len(following) if self.exact else _OBJECT_BATCH
+        # Python's garbage collector, run in the middle of a step, can free something that
+        # touches the GPU while compiled code is being recorded as a CUDA graph, and CUDA then
+        # abandons the recording. It waits until the step is over.
+        collecting = gc.isenabled()
+        gc.disable()
         try:
             with precision(self.device.type, self.bf16):
                 feats, pos, sizes, cols = self._encode([frames[c][0] for c in busy], reuse)
@@ -343,6 +349,8 @@ class Engine:
                 return self._outputs(low, hw, out)
         finally:
             self._use(False)  # the predictor is shared: leave it as stock has it
+            if collecting:
+                gc.enable()
 
     def _prepared(self, frames, busy):
         """The busy cameras' frames as prepare() gives them. Raw frames are resized

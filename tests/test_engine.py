@@ -332,6 +332,14 @@ def test_edges(pred, tmp_path):
     assert engine.step({"cam": (frames[1][0], (24, 40))})["cam"][1].shape == (24, 40)
     engine.drop("cam")
     assert engine.step({"cam": frames[1]}) == {"cam": {}} and not engine.tracks
+    # A step pauses the garbage collector and must leave it as it found it.
+    import gc
+    engine.step({"cam": frames[0]})
+    assert gc.isenabled()
+    gc.disable()
+    engine.step({"cam": frames[0]})
+    assert not gc.isenabled()
+    gc.enable()
     # The predictor is shared with stock: a step must leave its modules as they were.
     for mod in (pred.sam_prompt_encoder, pred.image_encoder.neck.position_encoding):
         assert "forward" not in vars(mod)

@@ -190,8 +190,8 @@ of that model's -0.0004.
 
 `pytest` (`tests/test_engine.py`): with `Engine(exact=True)` one camera gives
 masks identical to stock's on every frame, on the CPU and the GPU, for EdgeTAM
-and SAM 2.1 tiny, for mask, box and click prompts. 31 tests pass with a GPU; 24
-run without one.
+and SAM 2.1 tiny, for mask, box and click prompts. 35 tests pass on a machine
+with two GPUs; 27 run without one.
 
 ### Raw frames
 
@@ -379,6 +379,8 @@ page-locked buffer, won back a few percent at most.
 
 ## Two GPUs
 
+### One process each
+
 Two RTX 4090s in one machine with an AMD Ryzen 9 7950X. EdgeTAM compiled, one
 object per camera, frames already on the GPU, frames per second in total:
 
@@ -393,6 +395,37 @@ and the same with `=1` at the same time. Each process then sees its GPU as the
 first one and reuses the code the other compiled, so the second starts in 42
 seconds. A GPU addressed as `cuda:1` inside one process compiles everything
 again (813 seconds).
+
+### Through a Router
+
+`bench/router.py`. Every camera plays a 30 frames/s H.264 file in a loop at its
+own frame rate, as a live camera sends frames, with one object each, and the
+router places the cameras. Given more cameras than the GPUs can keep up with,
+every camera skips frames and the total is what the GPUs can do. Delay is from a
+frame being decoded to its masks reaching the router. Two RTX 4090s in one
+machine with an AMD EPYC 7742 (a shared host, slower than the others here: one
+engine reached 253 frames/s on it, against 337 on the EPYC 9684X).
+
+| video | GPUs | cameras | frames/s | each camera | delay, median / 95th percentile |
+|---|---|---|---|---|---|
+| 720p | 1 | 16 | 241 | 15 | 84 / 98 ms |
+| 720p | 2 | 32 | 476 | 15 | 82 / 109 ms |
+| 720p | 2 | 12 | 359 | 30, all of them | 20 / 31 ms |
+| 1080p | 1 | 16 | 199 | 12 | 97 / 121 ms |
+| 1080p | 2 | 32 | 343 | 11 | 109 / 149 ms |
+
+The router put the same number of cameras on each GPU every time, and every
+camera got the same share. Two GPUs give 1.98 times one at 720p and 1.72 times
+at 1080p, where decoding 32 cameras of 1080p video, every frame of which has to
+be decoded even when it is skipped, starts to compete for the processor. The
+router was ready in 132 to 150 seconds with both GPUs, the second worker
+starting from the code the first compiled.
+
+Each camera's decoder gets one thread. Left to itself, OpenCV's FFmpeg decoder
+starts one per core for every camera; on this host 32 cameras at 1080p then
+held both GPUs to 55 frames/s, against 343 with one thread each, and the other
+rows rose by 4 to 11%. (The first and third rows were measured before that
+change; at 16 cameras of 720p it made no difference.)
 
 ## Waiting inside a step
 

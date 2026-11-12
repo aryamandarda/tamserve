@@ -38,6 +38,7 @@ tamserve does what LLM servers such as vLLM do for chat: every camera shares one
 | 64 cameras | would need about 70 GB of GPU memory | 321 frames/s in 5.7 GB |
 | GPU memory for an 800-frame video | 9.8 GB | 0.28 GB, however long it runs |
 | Starting to track something new mid-stream | not possible | on any frame |
+| Several GPUs | you split the cameras between them by hand | a `Router` places the cameras and gathers every result |
 | Accuracy on DAVIS 2017 | 0.8686 | 0.8685 |
 
 These are for EdgeTAM on one RTX 4090, against EdgeTAM's own code at its fastest: compiled, one copy per camera, all sharing the GPU. Speeds are totals across the cameras, with one object each. With the larger SAM 2.1 models, tamserve runs at the same speed as Meta's current SAM 2 code and uses about a third of the GPU memory. [Results](#results) has the full tables.
@@ -190,6 +191,35 @@ engine.add(frames, {"yard": {"dog": Box(300, 380, 420, 470)}})  # frames: the on
 
 Later starts are quick because PyTorch keeps the compiled code on disk. By default it keeps it in `/tmp`, so point `TORCHINDUCTOR_CACHE_DIR` at a folder that survives a reboot. Compiling has only been tested on Linux.
 
+### Several GPUs
+
+One engine drives one GPU. For a machine with several, use a `Router`. It starts a worker on each GPU, puts each camera on the one with the most room, and gives you every camera's results in one place. Each worker opens and decodes its own cameras, so video never travels between them.
+
+```python
+from tamserve import Box, Router
+
+
+def main():
+    router = Router(compile=True)  # a worker on every GPU this machine has
+    router.add_camera("dock-1", "rtsp://10.1.0.21/stream")
+    router.add_camera("dock-2", "rtsp://10.1.0.22/stream")
+    router.start("dock-1", "forklift", Box(410, 120, 560, 480))
+
+    for update in router.results():  # every camera, whichever GPU tracked it
+        for name, mask in update.masks.items():
+            print(update.camera, update.frame, name, mask.box, mask.area)
+
+
+if __name__ == "__main__":  # each worker is a new Python process, and it imports this file as it starts
+    main()
+```
+
+The router reads the cameras itself, so you give it each camera's address instead of handing it frames. Opening streams by address needs OpenCV (`pip install opencv-python-headless`). You can also pass a function that returns your own reader. `start()`, `stop()` and `remove_camera()` work as on an engine.
+
+Masks arrive in a compact form, a few KB each instead of a full grid of pixels. `mask.box` and `mask.area` are ready to use, and `mask.array()` gives the full True/False grid when you need it. Each update also carries the frame's number. If a person or a detector pointed at something on a frame the router has already moved past, pass that number as `start(..., frame=n)`: the worker starts the object on that frame and catches it up through the frames it kept.
+
+On two RTX 4090s, with one object per camera, a router tracked 476 frames a second from 32 cameras of 720p video, against 241 on one GPU. Below what the GPUs can do, every camera is tracked at its full 30 frames a second and masks reach the router 20 ms after the frame was decoded.
+
 ## How it works
 
 For every frame, a SAM 2-style tracker encodes the image, looks the object up in its memory of recent frames, draws the mask, and writes the frame into that memory. tamserve runs those same four modules, once per step, over every object on every camera.
@@ -315,7 +345,7 @@ What tamserve does not do:
 - **Track backwards.** It only moves forward in time, which is all a live camera needs. Stock can also run backwards from a prompt in a recorded clip.
 - **Adjust a mask without restarting it.** Fixing a track means pointing at the object again, and tracking starts over from there. Stock also lets you add a click that nudges the current mask while keeping its history, and lets you prompt one object on several frames. tamserve has neither.
 - **Find or recognise objects.** Something else has to supply the first prompt. If an object leaves the view, its mask comes back empty, and whether it is picked up again when it returns is up to the model.
-- **Spread cameras over several GPUs for you.** One engine drives one GPU and must be called from one thread. With more GPUs, run one process per GPU and give each its share of the cameras. Two RTX 4090s tracked 707 frames/s that way, twice what one does.
+- **Use GPUs on other machines.** A router spreads cameras over the GPUs of the machine it runs on.
 
 What to expect in practice:
 
@@ -328,7 +358,7 @@ What to expect in practice:
 ```bash
 git clone https://github.com/aryamandarda/tamserve.git && cd tamserve
 uv sync --group dev --group bench
-uv run pytest                                   # 24 tests on a CPU, 31 with a GPU
+uv run pytest                                   # 27 tests on a CPU, 35 with two GPUs
 scripts/fetch_davis.sh                          # DAVIS 2017, 833 MB, for the accuracy benchmark
 
 uv run python bench/throughput.py --arms procs-compiled --procs 1,2,4,8                    # stock
@@ -337,6 +367,7 @@ uv run python bench/accuracy.py --compile best     # add --model sam2.1-tiny and
 uv run python bench/memory.py
 uv run python bench/engine_profile.py --stages
 uv run --with opencv-python-headless python bench/live.py --video your-video.mp4   # the live loop
+uv run --with opencv-python-headless python bench/router.py --video your-video.mp4 --gpus 0,1   # several GPUs
 
 uv pip install sam2                                # Meta's current SAM 2 code, for the SAM 2.1 comparison
 uv run python bench/throughput.py --model sam2.1-tiny --stock sam2 --arms procs-compiled --procs 1,2,4,8
@@ -350,10 +381,11 @@ The stock arms need NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark 
 | path | what is there |
 |---|---|
 | [`src/tamserve/engine.py`](src/tamserve/engine.py) | the engine: batching, per-object memory, compiling |
+| [`src/tamserve/router.py`](src/tamserve/router.py), [`worker.py`](src/tamserve/worker.py) | cameras spread over several GPUs: placing them, and the worker on each GPU |
 | [`src/tamserve/models.py`](src/tamserve/models.py) | fetching, checking and loading EdgeTAM and SAM 2.1 |
 | [`src/tamserve/reference.py`](src/tamserve/reference.py), [`compare.py`](src/tamserve/compare.py) | the stock predictor as a reference, and mask comparison |
 | [`tests/`](tests/) | bit-for-bit checks against stock; objects joining, leaving and restarting |
-| [`bench/`](bench/) | the six scripts behind every number here |
+| [`bench/`](bench/) | the scripts behind every number here |
 | [`docs/`](docs/) | how it works, and all results |
 
 | read more | what it covers |

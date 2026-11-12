@@ -166,6 +166,12 @@ a batch whose size changes whenever an object comes or goes:
 
 Prompting stays uncompiled: it is rare, and its shapes vary with the prompt.
 
+Python's garbage collector is paused for the length of each step. If it runs
+while compiled code is being recorded as a CUDA graph, it can free something
+that touches the GPU, and CUDA abandons the recording. This happened at start-up
+in some processes and never in others, depending on how many objects each had
+made; with the collector paused it stopped.
+
 ### Encoder pieces
 
 EdgeTAM's image encoder does the least GPU work per frame when it is given 4
@@ -245,8 +251,9 @@ or that anyone can write to. The code is stored under the package name
 - The engine follows what it is told to follow. It does not find objects, and if
   one leaves the view its mask comes back empty until the model picks it up
   again, if it does.
-- One engine drives one GPU and is called from one thread. For several GPUs, run
-  one process per GPU ([results.md](results.md#two-gpus)).
+- One engine drives one GPU and is called from one thread. A `Router` spreads
+  cameras over the GPUs of one machine, a worker process on each
+  ([results.md](results.md#through-a-router)).
 - The timings are from one RTX 4090. The two tuning choices made from them, CUDA
   graphs for calls of one or two rows and encoder pieces of 4, are safe on any
   GPU but may not be the fastest choice on another.

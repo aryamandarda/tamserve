@@ -200,3 +200,22 @@ def test_a_lost_worker_hands_its_cameras_over_and_comes_back(tmp_path):
             time.sleep(1)
         s = router.status()
         assert s["cameras"]["a"]["worker"] == "cpu" and s["cameras"]["a"]["objects"] == [1]
+
+
+def test_moving_a_full_size_mask_does_not_lock_the_router(tmp_path):
+    # Moving an object sends its last mask, 900 KB at 720p: more than a pipe holds. The
+    # router's own thread must not wait on that send while the worker waits on it.
+    folder, seeds, _ = _video(tmp_path / "a", 720, 1280, 30, [(300, 400, 120, 2, 6, (220, 40, 40))], seed=0)
+    with Router(workers=["cpu", "cpu"]) as router:
+        router.add_camera("big", functools.partial(Frames, folder), skip=False)
+        router.start("big", 1, seeds[1].numpy(), frame=0)
+        lost = router.home["big"]
+        for u in router.results(timeout=120):
+            if u.masks:
+                break
+        router._workers[lost].process.kill()
+        _statuses(router, "big", "moved")
+        for u in router.results(timeout=120):
+            if u.camera == "big" and u.masks:
+                assert u.masks[1].shape == (720, 1280)
+                break

@@ -53,7 +53,37 @@ def _visible(device):
     return ids[index], "cuda"
 
 
-class _Local:
+class _Outbox:
+    """Sends a worker's commands from a thread of its own, in order. The router's own
+    thread is the only reader of every worker's messages, so it must never wait on a
+    send: a worker can be waiting for it to read just then, and a large message (a
+    mask, to move an object) fills a pipe. A send that fails sets `broken`."""
+
+    def _open_outbox(self, deliver):
+        self._queue, self._deliver, self.broken = queue.Queue(), deliver, None
+        self._sender = threading.Thread(target=self._drain, daemon=True)
+        self._sender.start()
+
+    def _drain(self):
+        while (command := self._queue.get()) is not None:
+            try:
+                self._deliver(command)
+            except Exception as e:
+                self.broken = f"{type(e).__name__}: {e}"
+                return
+
+    def send(self, *command):
+        if not self.alive:
+            raise RuntimeError(f"the worker at {self.device} has stopped")
+        self._queue.put(command)
+
+    def _close_outbox(self):
+        """Delivers what is queued, the close command included, waiting at most 5 s."""
+        self._queue.put(None)
+        self._sender.join(timeout=5)
+
+
+class _Local(_Outbox):
     """A worker process on this machine, which the router starts."""
     remote = False
 
@@ -78,6 +108,7 @@ class _Local:
         events.close()  # this process's copies, so that the worker exiting reaches us as the end of the pipe
         self.device, self.cameras, self.busy, self.counted = device, set(), 0.0, 0
         self.alive, self.lock, self.heard = False, threading.Lock(), time.monotonic()
+        self._open_outbox(self.commands.send)
 
     def ready(self):
         """Waits until the worker's engine is built."""
@@ -95,24 +126,17 @@ class _Local:
     def recv(self):
         return self.events.recv()
 
-    def send(self, *command):
-        with self.lock:
-            if not self.alive:
-                raise RuntimeError(f"the worker for {self.device} has stopped")
-            self.commands.send(command)
-
     def close(self):
-        try:
+        if self.alive:
             self.send("close")
-        except (RuntimeError, OSError):
-            pass
         self.alive = False
+        self._close_outbox()
         self.process.join(timeout=10)
         if self.process.is_alive():
             self.process.terminate()
 
 
-class _Remote:
+class _Remote(_Outbox):
     """A `tamserve worker` on another machine, reached over the network."""
     remote = True
 
@@ -139,6 +163,7 @@ class _Remote:
         self.offset = about["time"] - (sent + back) / 2
         self.about, self.cameras, self.busy, self.counted = about, set(), 0.0, 0
         self.alive, self.lock, self.heard = True, threading.Lock(), time.monotonic()
+        self._open_outbox(lambda command: wire.send(self.conn, command))
 
     def ready(self):
         pass  # a remote worker builds its engine when it starts, before anyone connects
@@ -153,18 +178,11 @@ class _Remote:
                                    for u in message[1]])
         return message
 
-    def send(self, *command):
-        with self.lock:
-            if not self.alive:
-                raise RuntimeError(f"the worker at {self.device} has stopped")
-            wire.send(self.conn, command)
-
     def close(self):
-        try:
+        if self.alive:
             self.send("close")
-        except (RuntimeError, OSError):
-            pass
         self.alive = False
+        self._close_outbox()
         self.conn.close()
 
 
@@ -220,23 +238,27 @@ class Router:
         self._specs: list = []  # how to start each worker again
         self._lock = threading.RLock()
         self._closing = threading.Event()
-        self._watcher = None
+        # Running before any worker is ready, so that a worker hears from the router as soon
+        # as it is, even while the next one is still compiling (which can take minutes).
+        self._watcher = threading.Thread(target=self._watch, daemon=True)
+        self._watcher.start()
         try:
             for address in remote:
-                self._workers.append(_Remote(address, self._token, model))
-                self._specs.append(address)
+                w = _Remote(address, self._token, model)
+                with self._lock:
+                    self._workers.append(w)
+                    self._specs.append(address)
             # Compiling, the first local worker goes alone and the others start from its compiled code.
             for group in ([local[:1], local[1:]] if options.get("compile") else [local]):
                 started = [_Local(d, model, options, keep) for d in group]
-                self._workers += started
-                self._specs += group
+                with self._lock:
+                    self._workers += started
+                    self._specs += group
                 for w in started:
                     w.ready()
         except BaseException:
             self.close()
             raise
-        self._watcher = threading.Thread(target=self._watch, daemon=True)
-        self._watcher.start()
 
     def add_camera(self, camera, source, *, skip: bool = True, retry_for: float | None = None) -> int:
         """Start reading a camera, on the worker with the most room; returns its index.
@@ -407,6 +429,9 @@ class Router:
                 next_ping = time.monotonic() + _PING
                 for w in running:
                     if not w.alive:
+                        continue
+                    if w.broken:
+                        self._lost(w, f"a send to it failed ({w.broken})")
                         continue
                     if time.monotonic() - w.heard > _SILENCE:
                         self._lost(w, f"nothing heard from it for {_SILENCE:.0f} s")

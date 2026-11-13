@@ -457,6 +457,142 @@ a tenth of a second: a remote worker compiles once, when it starts.
 `bench/router.py --workers 127.0.0.1:7300,127.0.0.1:7301 --token-file token --source rtsp://127.0.0.1:8554/cam{i}`
 on A. 38 tests passed on A.
 
+## People
+
+`PeopleTracker` against SAM 3's own video tracker, both finding and following
+"person". How it works is in [how-it-works.md](how-it-works.md#following-people).
+
+This section comes from a different machine from the rest of the page: an RTX 4090
+(24 GB) with an AMD EPYC 7742, of which the machine may use 30 cores, PyTorch 2.15
+with CUDA 13.2. CPU threads are capped with `OMP_NUM_THREADS=16`, because the
+machine reports 255 cores and PyTorch otherwise starts a thread for each and
+stalls. SAM 3 is Meta's code at commit `f1647e8` with its defaults, and its video
+tracker keeps frames and tracking state in host memory, without which it runs out
+of GPU memory sooner. Both systems run on this one machine, on the same frames.
+The engine is compiled (`compile=True`) and so are the looks, unless a row says
+otherwise.
+
+HOTA is the usual score for tracking, from 0 to 100: the geometric mean of how
+well people are found (DetA) and how well each keeps one id over time (AssA),
+averaged over how strictly a mask has to overlap its label. IDF1 is the share of
+people-frames given the right id. Scored with TrackEval at commit `12c8791`. Time
+is wall time per camera-frame once the GPU has finished; reading frames from disk
+is not counted.
+
+```bash
+uv pip install "sam3 @ git+https://github.com/facebookresearch/sam3@f1647e8d0c1d280991f4d1b7d974c2704537fe66" \
+    "setuptools<81" einops psutil pycocotools scipy tabulate remotezip
+scripts/setup_trackeval.sh
+```
+
+### Homes
+
+The 116 videos of BURST's validation set that come from Charades and have every
+person labelled: people filming themselves at home, mostly one or two to a video,
+34,039 frames at 10 frames a second, labelled once a second
+(`bench/people_homes.py` fetches them and lays them out). `PeopleTracker` runs all
+116 at once, as 116 cameras; SAM 3 takes one video at a time.
+
+| system | HOTA | DetA | AssA | IDF1 | ID switches | ms per frame | GPU memory, peak |
+|---|---|---|---|---|---|---|---|
+| SAM 3's own tracker | 87.8 | 80.1 | 96.3 | 90.1 | 2 | 126 | 9.6 GB |
+| `PeopleTracker` | **89.6** | 85.7 | 93.8 | 94.0 | 6 | **8.9** | 9.2 GB |
+
+```bash
+uv run python bench/people_homes.py
+uv run python bench/people.py --data data/homes --compile
+uv run python bench/people.py --data data/homes --system sam3
+```
+
+Of the 8.9 ms, 4.5 are the looks (2,376 of them at 64.7 ms each) and 4.4 are
+following. Not compiled, on every fourth video, it scores 91.7 at 16.3 ms a frame,
+with a look at 94.7 ms.
+
+### Crowded streets
+
+MOTS20's four training sequences: pedestrians in city streets, about 9 labelled
+people a frame, every frame labelled. SAM 3's tracker cannot finish a whole
+sequence in 24 GB, so both systems are scored on each sequence's first 100
+frames, 400 frames in all.
+
+| system | HOTA | DetA | AssA | IDF1 | ID switches | ms per frame | GPU memory, peak |
+|---|---|---|---|---|---|---|---|
+| SAM 3's own tracker | 77.7 | 70.2 | 88.6 | 91.2 | 1 | 521 | 18.5 GB |
+| `PeopleTracker`, a look every frame | **78.3** | 74.0 | 85.1 | 89.9 | 32 | 183 | 4.4 GB |
+| a look every frame, `hold=15` | 78.6 | 74.1 | 85.7 | 90.1 | 17 | 180 | 4.4 GB |
+| every 2nd frame, `hold=15` | 76.2 | 71.5 | 83.7 | 87.6 | 14 | 115 | 4.4 GB |
+| every 5th frame, `hold=15` | 74.0 | 68.2 | 82.9 | 86.1 | 15 | 65 | 4.4 GB |
+| every 15th frame, the default | 72.6 | 64.0 | 84.8 | 85.1 | 4 | **44** | 4.4 GB |
+
+```bash
+mkdir -p data/mots && curl -fL -o data/mots/MOTS.zip https://motchallenge.net/data/MOTS.zip && unzip -q data/mots/MOTS.zip -d data/mots
+uv run python bench/people.py --max-frames 100 --compile --look-every 1      # add --hold 15, and so on
+uv run python bench/people.py --max-frames 100 --system sam3
+```
+
+With a look on every frame `PeopleTracker` finds people better than SAM 3's
+tracker and swaps ids more often. Looking less often trades accuracy for time.
+In a crowd a look costs 82 to 85 ms, more than in a home, because there are more
+outlines to draw.
+
+### The threshold
+
+SAM 3 gives each outline a confidence. An outline needs 0.7 to start a new person,
+and the finder's own threshold, 0.4, to confirm someone already followed. That
+second number is a trade between the two kinds of scene:
+
+| finder threshold | homes, HOTA | crowds, a look every 15th frame | crowds, a look every frame (`hold=15`) |
+|---|---|---|---|
+| 0.4, the default | 89.6 | 72.6 | 78.6 |
+| 0.5 | 89.7 | 72.3 | 78.0 |
+| 0.6 | 90.0 | 72.1 | 77.3 |
+| 0.7 | 90.4 | 71.9 | 76.3 |
+
+`PeopleTracker(engine, finder=PeopleFinder(threshold=0.7, compile="default"))` is
+the setting for rooms with few people.
+
+```bash
+uv run python bench/people.py --data data/homes --compile --threshold 0.7
+```
+
+### Cameras per GPU
+
+Cameras replay the videos in a loop; frames are read ahead on CPU threads, as live
+frames would already be decoded.
+
+| home cameras | frames/s per camera | frames/s in total | step, median / 95th percentile |
+|---|---|---|---|
+| 8 | 7.7 | 62 | 130 / 141 ms |
+| 16 | 5.3 | 85 | 189 / 257 ms |
+| 32 | 2.8 | 88 | 362 / 431 ms |
+| 64 | 1.4 | 91 | 706 / 782 ms |
+
+| crowded cameras | people followed | frames/s per camera | frames/s in total |
+|---|---|---|---|
+| 2 | 28 | 13.5 | 27 |
+| 4 | 52 | 6.6 | 26 |
+| 8 | 105 | 2.7 | 22 |
+
+```bash
+uv run python bench/people_load.py --data data/homes --compile --cameras 8,16,32,64
+uv run python bench/people_load.py --data data/mots/MOTS --compile --cameras 2,4,8
+```
+
+### Memory over time
+
+| | SAM 3's own tracker | `PeopleTracker` |
+|---|---|---|
+| one home video repeated to 3,000 frames, GPU memory | out of memory (24 GB) at frame 423 | 3.5 GB at frame 500 and at frame 3,000 |
+| 16 home cameras for 12 minutes | not possible: one video at a time | 3.7 GB at minute 1 and at minute 12; step 188 to 190 ms throughout |
+
+Host memory in the 12-minute run went from 5.9 to 6.1 GB.
+
+```bash
+uv run python bench/people.py --data data/homes --long 3000 --compile
+uv run python bench/people.py --data data/homes --long 3000 --system sam3
+uv run python bench/people_load.py --data data/homes --compile --cameras 16 --minutes 12
+```
+
 ## Waiting inside a step
 
 How often the CPU stops until the GPU has finished everything queued, in one
@@ -488,3 +624,15 @@ masks to the CPU.
 | channels-last layout with cuDNN autotuning | 3% faster at a fixed batch size, slower when it changes; accuracy down 0.0013, two objects lost |
 | two engines in one process, a thread each, for two GPUs | 1.3 to 1.6 times one GPU where two processes give 2: the threads take turns at Python's interpreter. Two engines compiling at once also stopped each other for good, on a lock inside PyTorch's autocast. |
 | one engine per process, fed frames through a pipe, for two GPUs | 327 frames/s on two GPUs against 355 on one: every frame is copied on its way to the other process |
+
+For `PeopleTracker`, on the same videos as [People](#people):
+
+| idea | what happened |
+|---|---|
+| giving a person who returns their old number by appearance (colour, and the follower's own features under the mask) | harmful in a crowd: at a low threshold it merged different people, 63.3 HOTA to 50.8. No effect in homes. |
+| asking SAM 3 again about a person a look missed, with their box as a hint | it agrees to almost anything: as many people found as SAM 3's own tracker, but only 43% of the outlines right |
+| smaller looks, 672 pixels instead of 1008 | in a crowd it finds 76% of the people a full look finds. In homes, 1.3 HOTA lower for 9% less time. |
+| a small detector (YOLOE) for most looks, SAM 3 only to confirm someone new | in a crowd YOLOE alone scored 62 to 64 HOTA against 69 to 75 with SAM 3, and 61% of looks still needed SAM 3 |
+| encoding again only the parts of the picture that changed since the last look | exact: not one outline differed in 480 looks. But it saves 3 to 17% of a look where the subject fills the frame, and was only worth more on one wide, still shot. |
+| SAM 2.1 tiny as the follower | 0.7 HOTA higher in homes at 1.4 times the cost |
+| the same pairing for things other than people | 82 to 92% of the HOTA of SAM 3's own tracker on household objects (phones, cups, bags) and on free-form phrases, at a third to a fifth of its time. Not offered. |

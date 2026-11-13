@@ -255,6 +255,51 @@ failing the step for every camera on the GPU. A worker whose steps fail three
 times in a row decides its GPU is broken and stops, rather than reporting the same
 error forever.
 
+## Following people
+
+The engine follows what it is pointed at. `PeopleTracker`
+(`src/tamserve/people.py`) does the pointing for people, with a second model.
+
+SAM 3 is Meta's model that outlines everything in a picture that matches a word
+or a phrase, here "person". Running it on one frame is called a look below. SAM 3
+also has a video tracker of its own, which carries its outlines through a
+recorded video; that tracker is what `PeopleTracker` is measured against in
+[results.md](results.md#people).
+
+**A look every few frames.** A look is slow and following is cheap, so a camera
+is looked at once every `look_every` frames and followed in between. The cost of
+a frame is about L / k + F: a look (L) shared over the k frames between looks,
+plus following (F). On the home videos that is 65 / 15 + 4.4, about 8.9 ms, where
+SAM 3's own tracker takes 126 ms.
+
+**A leaner look.** As SAM 3 ships, a look at a crowded street takes 113 ms on an
+RTX 4090. Two changes bring it to 68 ms with the same outlines. The word "person" is encoded
+once instead of on every look (95 ms). And the decoder, which is hundreds of
+small GPU jobs and was limited by the CPU launching them, is compiled (68 ms).
+The image encoder keeps the GPU busy by itself and gains nothing from compiling;
+it is three quarters of what is left.
+
+**Keeping the same number on a person.** On a look frame the engine first
+predicts where everyone it follows is. SAM 3's outlines are then matched to
+those predictions by overlap, the best overlap first and one to one. A matched
+outline is that person; an unmatched one is someone new. Both start again from
+SAM 3's outline, which fits better than a mask carried for 15 frames. A person
+no outline matched is followed for `hold` more frames, out of the answer, and
+has their number back if a later look matches them.
+
+**Two thresholds.** An outline needs a confidence of 0.7 to start a new person
+but only 0.4 to confirm one who is already followed, and the confident outlines
+choose first. In a crowd this was worth 2.7 HOTA with a look on every frame. In
+homes it changed nothing.
+
+**A camera's first frame is always looked at.** After that, looks are rationed to
+about cameras / `look_every` per step, the most overdue camera first, so they do
+not all land on one step. Making new cameras wait their turn as well cost 2.9
+HOTA on the home videos: people on a camera's first frames went unseen.
+
+**Looks are not batched.** SAM 3's image encoder is pure arithmetic on a full
+GPU, so two frames in one call take as long as two calls.
+
 ## Where the model code comes from
 
 EdgeTAM is not published as a package, so on first use tamserve downloads its
@@ -291,6 +336,8 @@ or that anyone can write to. The code is stored under the package name
 - The engine follows what it is told to follow. It does not find objects, and if
   one leaves the view its mask comes back empty until the model picks it up
   again, if it does.
+- `PeopleTracker` finds people and nothing else, numbers them per camera, and runs
+  on one engine, so one GPU.
 - One engine drives one GPU and is called from one thread. A `Router` spreads
   cameras over several GPUs, on one machine or many, a worker on each
   ([results.md](results.md#through-a-router)).

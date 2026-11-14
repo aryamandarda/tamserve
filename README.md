@@ -212,14 +212,14 @@ HOTA is the usual score for tracking, from 0 to 100. It combines how well people
 | someone out of sight to keep their number for longer | `PeopleTracker(engine, hold=90)`: the number of frames a person no look has seen is still followed. The default is 30. |
 | your own detector in place of SAM 3 | `PeopleTracker(engine, finder=my_detector)`: anything that takes a list of frames and returns a list of masks for each |
 
-SAM 3 does not come with tamserve. Install Meta's code next to it:
+The people tracker is an add-on. It needs Meta's SAM 3, which does not come with tamserve unless you ask for it:
 
 ```bash
-pip install tamserve "sam3 @ git+https://github.com/facebookresearch/sam3@f1647e8d0c1d280991f4d1b7d974c2704537fe66" "setuptools<81" einops psutil
+pip install "tamserve[people]"
 hf auth login  # once: SAM 3's weights are gated
 ```
 
-Before the weights will download, accept Meta's licence on the [facebook/sam3](https://huggingface.co/facebook/sam3) page on Hugging Face. They are 3.5 GB and are fetched the first time a `PeopleTracker` starts. SAM 3 has its own licence, which is not Apache-2.0, so read it before you build on it. Its code also wants NumPy 1.26, and pip will move you to it.
+Before the weights will download, accept Meta's licence on the [facebook/sam3](https://huggingface.co/facebook/sam3) page on Hugging Face. They are 3.5 GB and are fetched the first time a `PeopleTracker` starts. SAM 3 has its own licence, which is not Apache-2.0, so read it before you build on it.
 
 ### Options
 

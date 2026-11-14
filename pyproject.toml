@@ -1,6 +1,6 @@
 [project]
 name = "tamserve"
-version = "0.2.0"
+version = "0.3.0"
 description = "Live, multi-camera tracking with SAM 2 and EdgeTAM, on one GPU or many: one model per GPU serves every camera."
 license = "Apache-2.0"
 readme = "README.md"
@@ -19,6 +19,10 @@ dependencies = [
     "timm>=1.0.17",  # EdgeTAM builds its backbone with it
 ]
 
+[project.optional-dependencies]
+# PeopleTracker's finder is Meta's SAM 3: its own licence, and weights gated on Hugging Face.
+people = ["sam3>=0.1.4"]
+
 [project.urls]
 Repository = "https://github.com/aryamandarda/tamserve"
 
@@ -32,6 +36,11 @@ bench = ["psutil", "opencv-python-headless>=4.8"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv]
+# SAM 3 holds NumPy below 2.4. Resolved apart from the development tools, so the tests keep
+# running on the newest NumPy, which is what a plain `pip install tamserve` gets.
+conflicts = [[{ extra = "people" }, { group = "dev" }, { group = "bench" }]]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tamserve"]

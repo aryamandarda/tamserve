@@ -23,6 +23,11 @@ import torch
 from PIL import Image
 
 _SAME = 0.3  # overlap (IoU) from which a found outline and a followed person are the same person
+# The word list SAM 3 reads prompts with. Its PyPI package leaves the file out, so it is
+# fetched once from Meta's repository and checked against this SHA-256.
+_VOCAB = ("https://raw.githubusercontent.com/facebookresearch/sam3/f1647e8d0c1d280991f4d1b7d974c2704537fe66"
+          "/sam3/assets/bpe_simple_vocab_16e6.txt.gz",
+          "924691ac288e54409236115652ad4aa250f48203de50a9e4722a6ecd48d6804a")
 
 
 def _match(people: dict, found: list, device=None) -> dict:
@@ -48,7 +53,7 @@ def _match(people: dict, found: list, device=None) -> dict:
 class PeopleFinder:
     """Every person in a frame, outlined by SAM 3.
 
-    Needs Meta's SAM 3 code (the README has the install line) and its weights,
+    Needs Meta's SAM 3 code (`pip install "tamserve[people]"`) and its weights,
     which are gated: accept Meta's licence for facebook/sam3 on Hugging Face and
     log in with `hf auth login`, or pass a downloaded `checkpoint`.
 
@@ -64,9 +69,12 @@ class PeopleFinder:
         from sam3.model.sam3_image_processor import Sam3Processor
         from sam3.model_builder import build_sam3_image_model
 
+        from tamserve.models import CACHE, _download
+
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        vocab = _download(_VOCAB[0], CACHE / "bpe_simple_vocab_16e6.txt.gz", _VOCAB[1])
         # Built on the CPU and moved: SAM 3's builder only knows "cuda", the first GPU.
-        model = build_sam3_image_model(device="cpu", checkpoint_path=checkpoint,
+        model = build_sam3_image_model(bpe_path=str(vocab), device="cpu", checkpoint_path=checkpoint,
                                        load_from_HF=checkpoint is None).to(self.device)
         if compile:
             # The decoder gains the most: it is hundreds of small GPU jobs, and the CPU

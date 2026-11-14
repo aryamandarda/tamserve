@@ -472,6 +472,10 @@ of GPU memory sooner. Both systems run on this one machine, on the same frames.
 The engine is compiled (`compile=True`) and so are the looks, unless a row says
 otherwise.
 
+`pip install "tamserve[people]"` installs SAM 3 from PyPI (0.1.4) instead of that
+commit. From a clean install with it, the default setting on the crowded streets
+scores 72.3 where the table below has 72.6.
+
 HOTA is the usual score for tracking, from 0 to 100: the geometric mean of how
 well people are found (DetA) and how well each keeps one id over time (AssA),
 averaged over how strictly a mask has to overlap its label. IDF1 is the share of

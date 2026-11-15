@@ -21,7 +21,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # Tracker and PeopleTracker find things with Meta's SAM 3: its own licence, and weights gated on Hugging Face.
-sam3 = ["sam3>=0.1.4"]
+# SAM 3 imports psutil without declaring it.
+sam3 = ["sam3>=0.1.4", "psutil"]
 
 [project.urls]
 Repository = "https://github.com/aryamandarda/tamserve"

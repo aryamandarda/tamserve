@@ -300,6 +300,59 @@ HOTA on the home videos: people on a camera's first frames went unseen.
 **Looks are not batched.** SAM 3's image encoder is pure arithmetic on a full
 GPU, so two frames in one call take as long as two calls.
 
+## Following what you name
+
+`Tracker` (`src/tamserve/tracker.py`) is the same pairing for anything that can
+be put in words: "dog", "the red mug", "forklift". Each camera has one or more
+prompts, SAM 3 looks at the camera every `look_every` frames, 3 by default, and
+the engine follows what it outlined in between. People have their own class
+because their settings were tuned on people and score better there; `Tracker`
+is for everything else, and for people next to other things.
+
+**The rules are SAM 3's own.** With SAM 3 looking at every single frame, a
+first version found more than SAM 3's video tracker did and was right half as
+often: SAM 3 on one frame reports many things that are not there, and its video
+tracker filters them out. Its rules for that are in its code
+(`sam3_video_base.py`), and `Tracker` follows them:
+
+- An outline that overlaps a more confident one of the same look by a tenth is
+  a repeat of it, and is dropped.
+- An outline and a followed object are the same object from a tenth of overlap.
+  For people the bar is three tenths.
+- An outline needs a confidence of 0.7 to start something new and 0.5 to
+  confirm something already followed.
+- A followed object starts again from SAM 3's outline only when SAM 3 scores
+  that outline 0.8 or more. Otherwise it keeps the mask the engine carried,
+  which holds a thin or half-hidden object better than a doubtful outline does.
+- A new object is on trial for its first 15 frames. If more than half of the
+  looks in that time do not see it, it was a false find and is removed.
+- After its trial an object is never hidden because a look missed it. It stays
+  in the answer for as long as the engine has a mask for it, and is forgotten
+  once no look has seen it for `hold` frames.
+
+**Several prompts, one encoding.** Three quarters of a look is SAM 3's image
+encoder, and it does not depend on the prompt. A camera with five prompts has
+its picture encoded once and each prompt answered from that, where SAM 3's video
+tracker, which takes one prompt a session, would run five times over.
+
+**Answers at once.** SAM 3's video tracker holds every answer back 15 frames,
+which is how an object that fails its trial never appears in its output.
+`Tracker` answers each frame as it comes, so a false find can show for up to 15
+frames before it is removed. `bench/named.py --late 15` scores both.
+
+**Cameras that do not move.** With `still=True` a camera's picture is compared
+with the one it last looked at, as the mean colour of each 16-pixel block. While
+no block has moved by more than 8 grey levels the camera looks every 30th frame
+only, and on frames that did not change since the last one followed, its objects
+are not followed either: their masks stay as they were. A camera with a new
+object on trial keeps looking. On a hand-held camera every frame changes, so the
+setting does nothing there.
+
+**What it does not match.** A look judges one frame alone. SAM 3's video tracker
+scores every frame with the objects it already follows as context, and that is
+where the last few points of accuracy are: looking more often does not recover
+them, because recall rises and precision falls by as much.
+
 ## Where the model code comes from
 
 EdgeTAM is not published as a package, so on first use tamserve downloads its

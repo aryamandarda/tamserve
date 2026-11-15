@@ -49,10 +49,17 @@ def first_frames(data, n, out):
         (dst / "gt").mkdir(exist_ok=True)
         for p in sorted((src / "img1").glob("*.jpg"))[:n]:
             (dst / "img1" / p.name).symlink_to(p.resolve())
-        rows = [r for r in (src / "gt" / "gt.txt").read_text().splitlines() if int(r.split(" ", 1)[0]) <= n]
-        (dst / "gt" / "gt.txt").write_text("\n".join(rows) + "\n")
+        last = n  # the last labelled frame kept: labels are numbered by scored frame
+        if (src / "scored.txt").exists():
+            marks = [k for k in (src / "scored.txt").read_text().split() if int(k) <= n]
+            (dst / "scored.txt").write_text("\n".join(marks) + "\n")
+            last = len(marks)
+        if (src / "prompt.txt").exists():
+            (dst / "prompt.txt").write_text((src / "prompt.txt").read_text())
+        rows = [r for r in (src / "gt" / "gt.txt").read_text().splitlines() if int(r.split(" ", 1)[0]) <= last]
+        (dst / "gt" / "gt.txt").write_text("\n".join(rows) + "\n" if rows else "")
         ini = (src / "seqinfo.ini").read_text().splitlines()
-        (dst / "seqinfo.ini").write_text("\n".join(f"seqLength={n}" if l.startswith("seqLength") else l
+        (dst / "seqinfo.ini").write_text("\n".join(f"seqLength={last}" if l.startswith("seqLength") else l
                                                    for l in ini) + "\n")
     return root
 

@@ -8,8 +8,8 @@ on every frame. Some pairs name nothing in the video: there a tracker should sta
 One sequence per video and phrase, the phrase in prompt.txt: every pair with something
 to find, and up to --negatives of each video's pairs with nothing.
 
-The first --skip videos are left out: Tracker's settings were chosen on them, so a
-score on them flatters it. What is laid out is 224 pairs from 117 other videos.
+The videos Tracker's settings were chosen on (CHOSEN_ON) are left out, so that a
+score here is not flattered by them. What is laid out is 224 pairs from 117 other videos.
 
 The dataset is gated on Hugging Face (facebook/SACo-VEval): accept its licence and log
 in with `hf auth login`. Its frames are one 30 GB archive, read here as a stream that
@@ -28,6 +28,10 @@ import requests
 from huggingface_hub import get_token, hf_hub_download, hf_hub_url
 
 REPO = "facebook/SACo-VEval"
+# The first 40 videos of the archive, by the number in their names (one of them has no pair kept).
+CHOSEN_ON = set("""000006 000034 000043 000049 000050 000062 000086 000101 000118 000133 000144 000181 000192
+000198 000208 000230 000254 000266 000275 000282 000288 000291 000305 000324 000340 000359 000361 000378 000425
+000436 000441 000458 000484 000531 000555 000583 000589 000590 000645""".split())
 
 
 def main():
@@ -35,7 +39,6 @@ def main():
     ap.add_argument("--out", default="data/saco")
     ap.add_argument("--frames", default="data/saco_frames")
     ap.add_argument("--videos", type=int, default=160)
-    ap.add_argument("--skip", type=int, default=40, help="leave out the first N videos, by name")
     ap.add_argument("--negatives", type=int, default=1, help="pairs with nothing to find kept per video")
     args = ap.parse_args()
     out, shared = Path(args.out), Path(args.frames)
@@ -82,8 +85,7 @@ def main():
         positive = [p for p in ps if (vid, p["category_id"]) in masklets]
         negative = [p for p in ps if (vid, p["category_id"]) not in masklets]
         pairs += positive + rng.sample(negative, min(args.negatives, len(negative)))
-    skipped = set(done[:args.skip])  # chosen after the sampling, so the pairs do not depend on --skip
-    pairs = [p for p in pairs if by_video[p["video_id"]] not in skipped]
+    pairs = [p for p in pairs if by_video[p["video_id"]][8:] not in CHOSEN_ON]
     n_pos = n_neg = 0
     for p in pairs:
         name = by_video[p["video_id"]]

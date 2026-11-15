@@ -127,6 +127,8 @@ def main():
     ap.add_argument("--every-nth", type=int, help="every N-th sequence only (a fixed subset)")
     ap.add_argument("--out", default="results/named")
     args = ap.parse_args()
+    if args.late and args.hold < _TRIAL:
+        ap.error("--late tells a removed false find from a forgotten object by its age: it needs --hold of 15 or more")
     out_dir = Path(args.out)
     if args.max_frames:
         args.data = str(first_frames(args.data, args.max_frames, out_dir))

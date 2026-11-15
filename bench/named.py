@@ -140,7 +140,11 @@ def main():
         + ("-still" if args.still else "") + ("-share" if args.share else "") + ("-compiled" if args.compile else ""))
     late_lines = None
     if args.system == "sam3":
-        lines, cost = run_sam3(args, seqs, train, prompts)
+        timings = {}
+        lines, cost = run_sam3(args, seqs, train, prompts, timings)
+        for kind, some in (("something", True), ("nothing", False)):  # what a prompt costs when it names something, and not
+            took = [timings[s] for s in seqs if bool((train / s / "gt" / "gt.txt").stat().st_size) == some]
+            cost[f"ms_per_frame_with_{kind}"] = round(sum(t for t, _ in took) / max(sum(n for _, n in took), 1) * 1e3, 2)
     else:
         lines, late_lines, cost = run_named(args, seqs, train, prompts)
     result = {"system": name, "dataset": Path(args.data).resolve().name, "sequences": len(seqs), **cost,

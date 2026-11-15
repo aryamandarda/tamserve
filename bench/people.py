@@ -142,7 +142,7 @@ def run_people(args, seqs, train):
                    "peak_gpu_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2)}
 
 
-def run_sam3(args, seqs, train, prompts=None):
+def run_sam3(args, seqs, train, prompts=None, timings=None):
     from sam3.model_builder import build_sam3_video_predictor
 
     predictor = build_sam3_video_predictor(checkpoint_path=args.sam3)
@@ -169,7 +169,10 @@ def run_sam3(args, seqs, train, prompts=None):
                 if r["frame_index"] % 100 == 99:  # its memory grows with the video's length
                     print(json.dumps({"seq": s, "frame": r["frame_index"] + 1,
                                       "gpu_allocated_gb": round(torch.cuda.memory_allocated() / 2**30, 1)}), flush=True)
-            seconds += clock(DEVICE) - t
+            took = clock(DEVICE) - t
+            seconds += took
+            if timings is not None:  # sequence -> (seconds, frames)
+                timings[s] = (took, r["frame_index"] + 1)
             predictor.handle_request(dict(type="close_session", session_id=sid))
     return lines, {"frames": frames, "seconds": seconds,
                    "peak_gpu_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2)}

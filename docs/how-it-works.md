@@ -389,8 +389,9 @@ or that anyone can write to. The code is stored under the package name
 - The engine follows what it is told to follow. It does not find objects, and if
   one leaves the view its mask comes back empty until the model picks it up
   again, if it does.
-- `PeopleTracker` finds people and nothing else, numbers them per camera, and runs
-  on one engine, so one GPU.
+- `Tracker` and `PeopleTracker` find what they are asked for with SAM 3. They
+  number things per camera, run on one engine, so one GPU, and their looks are
+  not batched across cameras.
 - One engine drives one GPU and is called from one thread. A `Router` spreads
   cameras over several GPUs, on one machine or many, a worker on each
   ([results.md](results.md#through-a-router)).

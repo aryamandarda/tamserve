@@ -643,6 +643,11 @@ Time is wall time per frame and prompt, once the GPU has finished. A camera aske
 for two things counts as two, because SAM 3's tracker takes one prompt a session
 and would run twice.
 
+`pip install "tamserve[sam3]"` installs SAM 3 from PyPI (0.1.4), not the commit
+SAM 3 is measured at here. From a clean install with it, every 8th pair of the
+benchmark below, not compiled, scores 50.1 at 45.3 ms a frame, where this setup
+scores 49.7 at 44.9 on the same pairs.
+
 ### Phrases on a moving camera
 
 SA-Co/VEval is Meta's own video benchmark for SAM 3. Its smart-glasses videos are

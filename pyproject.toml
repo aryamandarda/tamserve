@@ -20,8 +20,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# PeopleTracker's finder is Meta's SAM 3: its own licence, and weights gated on Hugging Face.
-people = ["sam3>=0.1.4"]
+# Tracker and PeopleTracker find things with Meta's SAM 3: its own licence, and weights gated on Hugging Face.
+sam3 = ["sam3>=0.1.4"]
 
 [project.urls]
 Repository = "https://github.com/aryamandarda/tamserve"
@@ -40,7 +40,7 @@ build-backend = "hatchling.build"
 [tool.uv]
 # SAM 3 holds NumPy below 2.4. Resolved apart from the development tools, so the tests keep
 # running on the newest NumPy, which is what a plain `pip install tamserve` gets.
-conflicts = [[{ extra = "people" }, { group = "dev" }, { group = "bench" }]]
+conflicts = [[{ extra = "sam3" }, { group = "dev" }, { group = "bench" }]]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tamserve"]

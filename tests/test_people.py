@@ -3,7 +3,7 @@ import pytest
 import torch
 
 from tamserve import Engine, PeopleTracker, build_video_predictor
-from tamserve.people import _match
+from tamserve.tracker import _match
 
 RED, YELLOW = (220, 40, 40), (240, 220, 60)
 
@@ -59,7 +59,7 @@ def test_match_is_one_to_one_by_overlap():
     a = torch.zeros(8, 8, dtype=torch.bool); a[:4, :4] = True
     b = torch.zeros(8, 8, dtype=torch.bool); b[4:, 4:] = True
     found = [b.clone(), a.clone(), torch.zeros(8, 8, dtype=torch.bool)]
-    assert _match({1: a, 2: b}, found) == {0: 2, 1: 1}
+    assert _match({1: a, 2: b}, found, 0.3) == {0: 2, 1: 1}
 
 
 def test_ids_stay_on_their_people_across_looks(pred):

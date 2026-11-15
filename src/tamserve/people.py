@@ -19,94 +19,25 @@ import math
 from dataclasses import dataclass, field
 
 import numpy as np
-import torch
-from PIL import Image
+
+from tamserve.tracker import Finder, _first_pick, _match
 
 _SAME = 0.3  # overlap (IoU) from which a found outline and a followed person are the same person
-# The word list SAM 3 reads prompts with. Its PyPI package leaves the file out, so it is
-# fetched once from Meta's repository and checked against this SHA-256.
-_VOCAB = ("https://raw.githubusercontent.com/facebookresearch/sam3/f1647e8d0c1d280991f4d1b7d974c2704537fe66"
-          "/sam3/assets/bpe_simple_vocab_16e6.txt.gz",
-          "924691ac288e54409236115652ad4aa250f48203de50a9e4722a6ecd48d6804a")
 
 
-def _match(people: dict, found: list, device=None) -> dict:
-    """found index -> person id, one to one, the best overlap first."""
-    if not people or not found:
-        return {}
-    ids = list(people)
-    a = torch.stack(found).to(device).flatten(1).float()
-    b = torch.stack([people[t] for t in ids]).to(device).flatten(1).float()
-    inter = a @ b.T  # exact: counts of pixels, whole numbers that float32 holds up to 2**24
-    iou = (inter / (a.sum(1)[:, None] + b.sum(1) - inter).clamp(min=1)).cpu()
-    out, taken = {}, set()
-    for flat in torch.argsort(iou.flatten(), descending=True).tolist():
-        i, j = divmod(flat, len(ids))
-        if iou[i, j] < _SAME:
-            break
-        if i not in out and ids[j] not in taken:
-            out[i] = ids[j]
-            taken.add(ids[j])
-    return out
-
-
-class PeopleFinder:
-    """Every person in a frame, outlined by SAM 3.
-
-    Needs Meta's SAM 3 code (`pip install "tamserve[people]"`) and its weights,
-    which are gated: accept Meta's licence for facebook/sam3 on Hugging Face and
-    log in with `hf auth login`, or pass a downloaded `checkpoint`.
+class PeopleFinder(Finder):
+    """Every person in a frame, outlined by SAM 3: Finder, asked for "person".
 
     threshold: the confidence, 0 to 1, below which SAM 3's outlines are ignored.
-    compile: a torch.compile mode such as "default", or None. The word "person" is
-        encoded once here, not on every look as SAM 3 ships (113 ms a look down to
-        95), and compiling brings a look to about 65 ms, with the same outlines up
-        to rounding. Compiling takes a few minutes, done here.
     """
 
     def __init__(self, *, checkpoint: str | None = None, threshold: float = 0.4, compile: str | None = None,
                  device=None):
-        from sam3.model.sam3_image_processor import Sam3Processor
-        from sam3.model_builder import build_sam3_image_model
+        super().__init__(checkpoint=checkpoint, threshold=threshold, compile=compile, device=device)
 
-        from tamserve.models import CACHE, _download
-
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        vocab = _download(_VOCAB[0], CACHE / "bpe_simple_vocab_16e6.txt.gz", _VOCAB[1])
-        # Built on the CPU and moved: SAM 3's builder only knows "cuda", the first GPU.
-        model = build_sam3_image_model(bpe_path=str(vocab), device="cpu", checkpoint_path=checkpoint,
-                                       load_from_HF=checkpoint is None).to(self.device)
-        if compile:
-            # The decoder gains the most: it is hundreds of small GPU jobs, and the CPU
-            # launching them was its limit (20 ms of a look).
-            trunk = model.backbone.vision_backbone.trunk
-            trunk.forward = torch.compile(trunk.forward, mode=compile, fullgraph=True)
-            for part in (model.transformer.encoder, model.transformer.decoder, model.segmentation_head):
-                part.forward = torch.compile(part.forward, mode=compile)
-        self.model = model
-        self.processor = Sam3Processor(model, device=self.device, confidence_threshold=threshold)
-        self._words = None  # "person", encoded
-        self.scores = []    # per frame of the latest call, each outline's confidence
-        if compile:  # compile now, on a made-up picture, not during the first real looks
-            noise = np.random.default_rng(0).integers(0, 255, (720, 1280, 3), dtype=np.uint8)
-            for _ in range(4):
-                self([noise])
-
-    @torch.inference_mode()
     def __call__(self, frames: list) -> list:
         """frames: H x W x 3 uint8 RGB arrays. Returns, for each, a list of bool masks."""
-        found, self.scores = [], []
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
-            for frame in frames:
-                state = self.processor.set_image(Image.fromarray(frame))
-                if self._words is None:
-                    self._words = self.model.backbone.forward_text(["person"], device=self.device)
-                state["backbone_out"].update(self._words)
-                state["geometric_prompt"] = self.model._get_dummy_prompt()
-                state = self.processor._forward_grounding(state)
-                found.append(list(state["masks"][:, 0].cpu()))
-                self.scores.append(state["scores"].float().cpu().tolist())
-        return found
+        return super().__call__(frames, [["person"]] * len(frames))
 
 
 @dataclass
@@ -213,14 +144,9 @@ class PeopleTracker:
         someone left over, and are dropped otherwise."""
         device = self.engine.device
         if confidence is None:
-            return outlines, _match(people, outlines, device)
-        sure = [i for i, s in enumerate(confidence) if s >= self.start]
-        weak = [i for i, s in enumerate(confidence) if s < self.start]
-        ids = {sure[k]: t for k, t in _match(people, [outlines[i] for i in sure], device).items()}
-        left = {t: m for t, m in people.items() if t not in ids.values()}
-        ids.update({weak[k]: t for k, t in _match(left, [outlines[i] for i in weak], device).items()})
-        kept = [i for i in range(len(outlines)) if i in ids or confidence[i] >= self.start]
-        return [outlines[i] for i in kept], {k: ids[i] for k, i in enumerate(kept) if i in ids}
+            return outlines, _match(people, outlines, _SAME, device)
+        kept, ids = _first_pick(people, outlines, confidence, self.start, _SAME, device)
+        return [outlines[i] for i in kept], ids
 
     def _due(self, cams):
         """Cameras that look this step. A camera's first frame is always looked at: who is

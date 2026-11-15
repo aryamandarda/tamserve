@@ -79,7 +79,8 @@ def run(tracker, cams, steps):
 
 def summary(times, people, n):
     med = float(np.median(times))
-    return {"cameras": n, "step_ms_median": round(med, 1), "step_ms_p95": round(float(np.percentile(times, 95)), 1),
+    return {"cameras": n, "step_ms_mean": round(float(times.mean()), 1), "step_ms_median": round(med, 1),
+            "step_ms_p95": round(float(np.percentile(times, 95)), 1),
             "fps_per_camera": round(1e3 / med, 1), "camera_frames_per_s": round(n * 1e3 / med, 1),
             "followed_per_step": round(float(people.mean()), 1)}
 

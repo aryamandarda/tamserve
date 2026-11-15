@@ -4,8 +4,8 @@ You give each camera one or more prompts, such as "dog" or "the red mug". SAM 3,
 Meta's model that outlines whatever you name, looks at each camera every
 `look_every` frames and outlines every match. Between looks the engine carries
 each outline from frame to frame, every object on every camera in one batch. A
-look is slow (about 65 ms on an RTX 4090 for one prompt, against a few ms to
-follow a frame), which is why SAM 3 only looks now and then.
+look is slow (about 65 ms on an RTX 4090 for one prompt) and is not shared
+between cameras, which is why SAM 3 only looks now and then.
 
 On a look, the engine first predicts where each object it is following is on
 that frame, and SAM 3's outlines are matched to those predictions by overlap, so

@@ -14,7 +14,11 @@ frames from live cameras would already be decoded.
   --prompts N   Tracker in place of PeopleTracker, on a dataset with a prompt.txt in each
                 sequence (bench/named_saco.py): every camera is asked for N things, its
                 sequence's own prompt and then others of the dataset, most of which name
-                nothing in view, as most prompts on a real camera would
+                nothing in view, as most prompts on a real camera would. Cameras replay
+                the sequences whose prompt names something, from staggered starts, and
+                a camera whose video starts over is dropped first, as a new camera: the
+                cut is not something a real camera shows, and Tracker would go on
+                following what was there before it.
 """
 import argparse
 import json
@@ -37,11 +41,14 @@ from tamserve.reference import clock
 class Cameras:
     """n cameras replaying the dataset's sequences in a loop, frames read ahead."""
 
-    def __init__(self, root, n, stagger=37):
+    def __init__(self, root, n, stagger=37, named=False):
         seqs = sorted(p for p in (Path(root) / "train").iterdir() if (p / "img1").is_dir())
+        if named:  # those with something to find
+            seqs = [s for s in seqs if (s / "gt" / "gt.txt").stat().st_size]
         self.paths = [sorted((s / "img1").glob("*.jpg")) for s in seqs]
         self.own = [(s / "prompt.txt").read_text().strip() if (s / "prompt.txt").exists() else None for s in seqs]
-        self.cams = [(i % len(seqs), (i // len(seqs)) * stagger) for i in range(n)]
+        self.cams = [(i % len(seqs), i * stagger % len(self.paths[i % len(seqs)]) if named else (i // len(seqs)) * stagger)
+                     for i in range(n)]
         self.k = 0
         self.pool = ThreadPoolExecutor(16)
         self.next = self.pool.submit(self._read, 0)
@@ -51,6 +58,10 @@ class Cameras:
         every = sorted(set(self.own))
         return {c: ([self.own[seq]] + [p for k in range(len(every)) for p in [every[(c * 7 + k) % len(every)]]
                                        if p != self.own[seq]])[:n] for c, (seq, _) in enumerate(self.cams)}
+
+    def restarted(self):
+        """The cameras whose video starts over on the frames about to be given."""
+        return [c for c, (seq, start) in enumerate(self.cams) if self.k and (start + self.k) % len(self.paths[seq]) == 0]
 
     def _read(self, k):
         def one(c):
@@ -69,8 +80,11 @@ class Cameras:
 def run(tracker, cams, steps):
     times, people = [], []
     for _ in range(steps):
+        restarted = cams.restarted() if isinstance(tracker, Tracker) else ()
         frames = cams.frames()
         t = clock("cuda")
+        for c in restarted:
+            tracker.drop(c)
         out = tracker.step(frames)
         times.append((clock("cuda") - t) * 1e3)
         people.append(sum(len(v) for v in out.values()))
@@ -106,7 +120,7 @@ def main():
     print(json.dumps({"gpu": torch.cuda.get_device_name(), "data": Path(args.data).name, "model": args.model,
                       "look_every": args.look_every, "prompts": args.prompts, "compile": args.compile}), flush=True)
     for n in map(int, args.cameras.split(",")):
-        cams = Cameras(args.data, n)
+        cams = Cameras(args.data, n, named=bool(args.prompts))
         engine = Engine(predictor, compile=args.compile)
         tracker = (Tracker(engine, cams.prompts(args.prompts), finder=finder, look_every=args.look_every)
                    if args.prompts else PeopleTracker(engine, finder=finder, look_every=args.look_every))

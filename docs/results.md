@@ -472,7 +472,7 @@ of GPU memory sooner. Both systems run on this one machine, on the same frames.
 The engine is compiled (`compile=True`) and so are the looks, unless a row says
 otherwise.
 
-`pip install "tamserve[people]"` installs SAM 3 from PyPI (0.1.4) instead of that
+`pip install "tamserve[sam3]"` installs SAM 3 from PyPI (0.1.4) instead of that
 commit. From a clean install with it, the default setting on the crowded streets
 scores 72.3 where the table below has 72.6.
 
@@ -597,6 +597,202 @@ uv run python bench/people.py --data data/homes --long 3000 --system sam3
 uv run python bench/people_load.py --data data/homes --compile --cameras 16 --minutes 12
 ```
 
+### Packed crowds
+
+MOT20's four training videos, each one's first 200 frames, run as four cameras:
+squares and station halls with 91.5 labelled people a frame on average. MOT20
+labels people with boxes around the whole person, hidden parts included, so here
+each mask is scored as the box around it. "Covered" is the share of labelled
+people that some followed person's box overlaps by at least a half. These two
+rows come from the second machine of [Anything you name](#anything-you-name).
+
+| setting | people followed per frame | covered, everyone | covered, those at least three quarters visible | ID switches | ms per frame |
+|---|---|---|---|---|---|
+| the default | 53.9 | 46% | 72% | 118 | 122 |
+| `start=0.5` | 70.8 | 58% | 84% | 214 | 169 |
+
+```bash
+curl -fL -o data/MOT20.zip https://motchallenge.net/data/MOT20.zip && unzip -q data/MOT20.zip 'MOT20/train/*' -d data
+uv run python bench/people_crowd.py --compile              # add --start 0.5
+```
+
+With 90 people in a frame SAM 3 is less sure of each one, and the confidence
+needed to start following someone, 0.7, leaves out a quarter of those in plain
+view. `PeopleTracker(engine, start=0.5)` follows more of them and swaps ids
+nearly twice as often. Looking more often does not help here: a look every 5th
+frame covered 75% of the clearly visible people and a look every frame 74%. The
+box score (HOTA 42.7 and 46.0) is a floor, since a mask covers only the part of a
+person that can be seen and the label's box covers all of them.
+
+## Anything you name
+
+`Tracker` against SAM 3's own video tracker, both finding and following what a
+phrase names. How it works is in
+[how-it-works.md](how-it-works.md#following-what-you-name).
+
+Two more machines, each an RTX 4090 (24 GB) with PyTorch 2.15 and CUDA 13.2: one
+with an Intel Core i9-13900K for the phrases, the cameras per GPU and the memory
+run, one with an AMD Ryzen 7 5700X for the cameras that do not move. On each,
+SAM 3 and `Tracker` run on the same frames, one after the other with nothing else
+on the GPU, and no time is compared across machines. SAM 3 is set up as in
+[People](#people). SAM 2.1 large follows between looks unless a row says
+otherwise, a look comes every 3rd frame, the engine is compiled (`compile=True`)
+and so are the looks.
+
+Time is wall time per frame and prompt, once the GPU has finished. A camera asked
+for two things counts as two, because SAM 3's tracker takes one prompt a session
+and would run twice.
+
+### Phrases on a moving camera
+
+SA-Co/VEval is Meta's own video benchmark for SAM 3. Its smart-glasses videos are
+20 seconds long at 6 frames a second, filmed from the wearer's head, each paired
+with phrases such as "the white scarf" or "the spiral staircase", and every
+matching object is outlined on every frame. 224 pairs from 117 videos are used
+here, 108 of them pairs where the phrase names nothing in the video and a tracker
+should stay silent. `Tracker`'s settings were chosen on 40 other videos of the
+set, which are left out (`bench/named_saco.py` lists them). `Tracker` runs all
+224 pairs at once, as 224 cameras; SAM 3 takes one at a time.
+
+| system | HOTA | found (DetRe) | right (DetPr) | AssA | IDF1 | ID switches | ms per frame | GPU memory, peak |
+|---|---|---|---|---|---|---|---|---|
+| SAM 3's own tracker | **59.4** | 61.1 | 63.3 | 76.9 | 64.2 | 154 | 100.5 | 14.2 GB |
+| `Tracker` | 56.3 | 56.5 | 66.1 | 71.6 | 61.0 | 173 | **40.7** | 12.7 GB |
+| `Tracker`, EdgeTAM follows | 54.6 | 54.5 | 63.8 | 70.6 | 59.6 | 232 | 25.7 | 9.3 GB |
+| EdgeTAM, a look every 5th frame | 54.1 | 52.5 | 67.2 | 69.1 | 59.4 | 172 | 16.9 | 9.2 GB |
+
+"Found" is the share of what is there that is outlined, "right" the share of what
+is outlined that is there. The scores are TrackEval's HOTA over the pairs, as on
+the rest of this page, not Meta's own cgF1.
+
+```bash
+uv run python bench/named_saco.py                       # needs access to facebook/SACo-VEval on Hugging Face
+uv run python bench/named.py --compile                  # add --model edgetam, --look-every 5
+uv run python bench/named.py --system sam3
+```
+
+`Tracker` reaches 95% of the score of SAM 3's tracker in two fifths of the time,
+and 92% in a quarter of it with EdgeTAM following. It is right slightly more often
+than SAM 3's tracker and finds less: a look judges one frame alone, where SAM 3's
+tracker scores every frame with what it already follows as context. Of the 40.7
+ms, 21.1 are the looks (9,141 of them at 62.4 ms each) and 19.6 are following.
+
+How much faster depends on the processor as well as the GPU. SAM 3's tracker
+spends more of its time on the CPU than `Tracker` does: on another RTX 4090
+machine with a slower processor it took 130 ms a frame on these videos, where an
+earlier version of `Tracker` took 42.6.
+
+**Answers at once.** SAM 3's tracker gives each frame's answer 15 frames late, and
+an object it drops in that time never shows. `Tracker` answers at once, so a false
+find shows until it is removed. Scored as if it too answered 15 frames late
+(`--late 15`), `Tracker` gets 56.5: waiting would buy 0.2 of a point.
+
+**Looking more often does not help.** A look every 2nd frame scored 0.7 higher
+than a look every 3rd for 1.3 times the cost, and a look on every frame 0.5 higher
+for twice the cost. More looks find more, and nearly as much of the extra is wrong.
+
+### Several prompts on a camera
+
+Most of a look's cost is encoding the picture, which every prompt of a camera
+shares. SAM 3's tracker takes one prompt a session, so each prompt costs it a
+full pass: 127 ms a frame for a phrase that names something in the video and 74
+ms for one that names nothing (`bench/named.py --system sam3` reports both).
+
+| prompts per camera | `Tracker`, ms per frame and prompt | SAM 3's tracker |
+|---|---|---|
+| one (the benchmark above) | 40.7 | 100.5 |
+| a video's own phrases, 1.9 on average | 30.3 | 100.5 |
+| 4, one of which names something | 26.6 | about 87 |
+| 8, one of which names something | 16.9 | about 81 |
+
+The first two rows are the benchmark, scored: with a video's phrases on one
+camera `Tracker` gets 56.6. The last two are 8 cameras replaying videos whose own
+phrase names something, each asked for that phrase and then others of the set,
+which mostly name nothing in view. SAM 3's figure there is worked out from its
+two costs, not run.
+
+```bash
+uv run python bench/named.py --compile --share
+uv run python bench/people_load.py --data data/saco --compile --model sam2.1-large --cameras 8 --prompts 4   # and 8
+```
+
+### Cameras per GPU
+
+Cameras replay, in a loop, the videos whose phrase names something, one prompt
+each. Frames are read ahead on CPU threads, as live frames would already be
+decoded, and a camera whose video starts over joins again as a new camera.
+
+| model that follows | cameras | frames/s per camera | frames/s in total | step, mean / 95th percentile |
+|---|---|---|---|---|
+| SAM 2.1 large | 1 | 15.5 | 15.5 | 64 / 110 ms |
+| | 4 | 3.3 | 13.3 | 302 / 375 ms |
+| | 8 | 1.9 | 15.0 | 534 / 614 ms |
+| | 16 | 1.0 | 16.4 | 976 / 1,085 ms |
+| EdgeTAM | 1 | 29.1 | 29.1 | 34 / 82 ms |
+| | 4 | 7.0 | 27.9 | 143 / 199 ms |
+| | 8 | 3.7 | 29.4 | 273 / 319 ms |
+| | 16 | 1.9 | 30.5 | 524 / 587 ms |
+
+A look is not batched across cameras, so the total stays about the same however
+many cameras share it: 16 frames a second with SAM 2.1 large and 30 with EdgeTAM,
+which is 61 and 33 ms for each camera's frame. SAM 3's tracker takes 127 ms a
+frame on such a video, one video at a time. A camera whose prompt names nothing
+costs only its looks, 21 ms a frame against SAM 3's 74, which is why the
+benchmark's average is below these.
+
+```bash
+uv run python bench/people_load.py --data data/saco --compile --model sam2.1-large --cameras 1,4,8,16 --prompts 1
+uv run python bench/people_load.py --data data/saco --compile --cameras 1,4,8,16 --prompts 1
+```
+
+### Cameras that do not move
+
+Twelve security cameras from [MEVA](https://mevadata.org) (a bus station, a
+school, an office and a hospital; 1080p, scaled to 1280 pixels wide, 10 frames a
+second), two 15-second windows from each, every window asked for "person", "car",
+"backpack", "chair" and "door". Nobody has labelled these videos, so the reference
+here is SAM 3's own tracker: the HOTA column says how closely `Tracker` reproduces
+what SAM 3 answers, not how right either of them is. For scale, SAM 3 started one
+frame earlier agrees with itself at 92.2. The settings were looked at on six of
+the cameras; the table is the other six, 59 pairs.
+
+| setting | agreement with SAM 3 (HOTA) | ms per frame and prompt | against SAM 3's 116.2 ms |
+|---|---|---|---|
+| `Tracker` | 76.3 | 38.1 | 3.0 times less |
+| `still=True` | 75.0 | 23.3 | 5.0 times less |
+| `still=True`, the five prompts of a window on one camera | 75.5 | 12.8 | 9.1 times less |
+| the same, EdgeTAM follows | 71.6 | 8.1 | 14.3 times less |
+
+`still=True` skips two fifths of the looks and of the following, and moves the
+agreement by about a point. On the moving cameras of the benchmark above it
+changes nothing: the same 9,141 looks and the same score, 56.3, for 1 ms a frame more spent comparing pictures.
+
+Most of the distance to SAM 3 here is one rule. While it follows nothing on a
+camera, SAM 3's tracker starts an object from any outline it reports, down to a
+confidence of 0.5, where `Tracker` always asks for 0.7. Copying that rule raised
+the agreement to 83.2 and lowered the score against human labels on the phrases
+above by half a point, so `Tracker` does not copy it.
+
+```bash
+uv run python bench/named_still.py --again              # fetches the clips, labels them with SAM 3, then SAM 3 against itself
+uv run python bench/named.py --data data/still --compile            # add --still, --share, --model edgetam
+uv run python bench/named.py --data data/still --system sam3
+```
+
+### Memory over time
+
+16 cameras, one prompt each, SAM 2.1 large following, for 19 minutes: GPU memory
+peaked between 6.74 and 6.81 GB in every one of the minutes, host memory went from
+6.2 to 6.3 GB, and a step took 0.94 to 1.03 seconds throughout, with 48 to 63
+objects followed. SAM 3's tracker keeps every frame's output for every object and
+grows with the video: on the 20-second videos above it peaked at 14.2 GB, and
+[People](#memory-over-time) has it running out of 24 GB at frame 423 of a longer
+one.
+
+```bash
+uv run python bench/people_load.py --data data/saco --compile --model sam2.1-large --cameras 16 --prompts 1 --minutes 20
+```
+
 ## Waiting inside a step
 
 How often the CPU stops until the GPU has finished everything queued, in one
@@ -641,4 +837,16 @@ For `PeopleTracker`, on the same videos as [People](#people):
 | the rules of SAM 3's own video tracker: duplicates dropped, 10% overlap to match, restart a person only from a confident outline, drop someone new that most looks miss | no gain for people. In a crowd with a look at every frame, restarting less costs 1.4 HOTA and doubles the id switches; matching at 10% overlap cuts id switches from 18 to 6 at the same HOTA; all together, 0.4 to 1.2 lower |
 | encoding again only the parts of the picture that changed since the last look | exact: not one outline differed in 480 looks. But it saves 3 to 17% of a look where the subject fills the frame, and was only worth more on one wide, still shot. |
 | SAM 2.1 tiny as the follower | 0.7 HOTA higher in homes at 1.4 times the cost |
-| the same pairing for things other than people | 82 to 92% of the HOTA of SAM 3's own tracker on household objects (phones, cups, bags) and on free-form phrases, at a third to a fifth of its time. Not offered. |
+
+For `Tracker`, on the videos of [Anything you name](#anything-you-name) and the 40
+its settings were chosen on:
+
+| idea | what happened |
+|---|---|
+| SAM 3 looking at every frame, without the rules of its own tracker | it found more than SAM 3's tracker (66% of what was there against 60%) and was right half as often (36% against 67%). The rules are what the difference was. |
+| a look on every frame of a doubtful new object's first 15 | 55.4 against 56.1 |
+| restarting an object from an outline at most every 16th frame, as SAM 3 does | no gain: 57.0 to 56.4 on the 40 videos, 57.0 to 58.5 on a smaller set of household objects |
+| on a camera that does not move, encoding again only the parts of the picture that changed | 17% of the picture needed encoding and a look got a fifth cheaper, but agreement with SAM 3 fell by a point, and with `still=True` on it saved nothing more |
+| a small model, taught by SAM 3 on each camera, to say when to look | it missed 6 of 32 new objects. A look whenever the picture changes sees 93% of them within 3 frames. |
+| a pruned copy of SAM 3's image encoder (DART, 16 of its 32 blocks) as the finder | 3 to 7 HOTA lower; the full encoder looking every 5th frame beats it looking every 3rd, at the same cost |
+| EfficientSAM3's small models as the finder | 17 to 30 HOTA lower, for a look 2.1 to 2.7 times cheaper |

@@ -5,7 +5,8 @@
 **Live, multi-camera tracking with SAM 2, on one GPU or many.**
 
 SAM 2 and its smaller sibling EdgeTAM can track anything you point at, but their code was written for one recorded video at a time.<br>
-tamserve is the serving engine they are missing: one copy of the model tracks every object on every camera, for as long as the cameras run.
+tamserve is the serving engine they are missing: one copy of the model tracks every object on every camera, for as long as the cameras run.<br>
+Point at what to track, or name it ("dog", "the red mug") and tamserve finds it.
 
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![PyTorch 2.6+](https://img.shields.io/badge/PyTorch-2.6%2B-EE4C2C?logo=pytorch&logoColor=white)
@@ -16,7 +17,7 @@ tamserve is the serving engine they are missing: one copy of the model tracks ev
 ![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue)
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aryamandarda/tamserve/blob/main/notebooks/quickstart.ipynb)
 
-[Why tamserve](#why-tamserve) · [New to video tracking?](#new-to-video-tracking) · [Using it](#using-it) · [How it works](#how-it-works) · [Results](#results) · [Limits](#limits)
+[Why tamserve](#why-tamserve) · [New to video tracking?](#new-to-video-tracking) · [Using it](#using-it) · [Tracking by name](#following-what-you-name) · [How it works](#how-it-works) · [Results](#results) · [Limits](#limits)
 
 <a href="https://github.com/aryamandarda/tamserve/blob/main/docs/media/tamserve-demo.mp4"><img src="https://raw.githubusercontent.com/aryamandarda/tamserve/main/docs/media/camera-wall.gif" width="880" alt="Six live cameras and nine objects tracked by tamserve on one GPU, every camera at 30 frames per second"></a>
 
@@ -39,7 +40,7 @@ tamserve does what LLM servers such as vLLM do for chat: every camera shares one
 | 64 cameras | would need about 70 GB of GPU memory | 321 frames/s in 5.7 GB |
 | GPU memory for an 800-frame video | 9.8 GB | 0.28 GB, however long it runs |
 | Starting to track something new mid-stream | not possible | on any frame |
-| Finding what to track | you point at each object | you point, or a `PeopleTracker` finds and follows every person by itself |
+| Finding what to track | you point at each object | you point, or you name it and a `Tracker` finds and follows every match by itself |
 | Several GPUs | you split the cameras between them by hand | a `Router` places the cameras and gathers every result |
 | Accuracy on DAVIS 2017 | 0.8686 | 0.8685 |
 
@@ -53,7 +54,7 @@ tamserve sits between one of those models and your program. Your program hands i
 
 It is meant for anyone who has to answer "where exactly is this thing, right now, in each of my video feeds": sports and broadcast graphics, warehouse and retail analytics, robotics, wildlife and lab monitoring, annotation tools.
 
-With one exception, it does not decide what to track. A person clicking on the picture, or a detector, has to say where the thing is to begin with, and tamserve takes over from there. The exception is people: a [`PeopleTracker`](#following-people-without-pointing-at-them) finds them itself.
+There are two ways to say what to track. You can point: a person clicking on the picture, or a detector, says where the thing is, and tamserve takes over from there. Or you can name it: a [`Tracker`](#following-what-you-name) takes a word or a phrase, finds everything that matches on every camera, and follows it.
 
 Four words come up a lot below:
 
@@ -61,7 +62,7 @@ Four words come up a lot below:
 |---|---|
 | frame | one image from a video |
 | mask | the answer for one object in one frame: a grid of True and False the size of the frame, True on every pixel that belongs to the object |
-| prompt | how you point at the thing you want tracked: a box around it, a click on it, or a rough mask of it |
+| prompt | how you say what to track: a box around it, a click on it, a rough mask of it, or, with a `Tracker`, a word or a phrase |
 | stock | the model's own code: the tracker in Meta's EdgeTAM repository, used exactly as it comes |
 
 ## Using it
@@ -173,9 +174,60 @@ engine.step(frames, {"door": {"courier": Box(455, 130, 600, 500)}})  # same name
 engine.add(frames, {"yard": {"dog": Box(300, 380, 420, 470)}})  # frames: the ones you just gave step()
 ```
 
-### Following people without pointing at them
+### Following what you name
 
-Everything above starts from a prompt: someone, or some other program, has to point at the thing. For people, tamserve can do that part itself. A `PeopleTracker` finds every person on every camera, follows them, picks up new arrivals and lets go of those who leave.
+Everything above starts from someone pointing at the thing. A `Tracker` takes words instead. Give it a phrase, or several, and it finds every match on every camera, follows each one, picks up new ones as they appear and lets go of those that leave.
+
+```python
+from tamserve import Engine, Tracker, build_video_predictor
+
+engine = Engine(build_video_predictor("cuda", "sam2.1-large"), compile=True)
+tracker = Tracker(engine, {"door": ["person", "package"], "yard": "dog"})  # loads SAM 3, the model that finds things
+
+while True:
+    frames = {name: camera.take() for name, camera in cameras.items()}  # as in the live loop above
+    masks = tracker.step(frames)
+    # masks["door"] is {1: mask, 2: mask, 3: mask}: one mask for everything found on the door camera
+    # tracker.names("door") is {1: "person", 2: "person", 3: "package"}: what each of them is
+```
+
+For the same phrase on every camera, `Tracker(engine, "dog")` is enough. Each thing gets a number, counted from 1 on each camera, and keeps it for as long as it is followed.
+
+It works by pairing two models. SAM 3 is Meta's model that outlines whatever you name. It is accurate and slow: one look at one frame takes about 65 ms on an RTX 4090. The model inside the engine cannot find anything by itself, but it follows what it is given far more cheaply, a few ms a frame with EdgeTAM and a few tens with SAM 2.1 large. So SAM 3 looks at each camera once every three frames, the engine follows what it found in between, and the looks are spread out so that they never all land in the same round.
+
+SAM 3 can also follow things through a video by itself. Here are the two side by side on one RTX 4090, on 117 videos from Meta's own benchmark for SAM 3, each paired with phrases such as "the white scarf" (224 pairs, none of them used to choose any setting). The security cameras are a second set of videos:
+
+| | SAM 3's own tracker | `Tracker` |
+|---|---|---|
+| Accuracy (HOTA) | 59.4 | 56.3, which is 95% of it |
+| GPU time per frame | 101 ms | **41 ms** |
+| Following with EdgeTAM, the smaller model | | 54.6 at **26 ms** |
+| Frames per second, when there is something to follow | 8, one video at a time | 15 on one camera, or 1 on each of 16; twice that with EdgeTAM |
+| Several things asked of one camera | a full pass for each | one look for all: 30 ms each at two a camera, 17 ms at eight |
+| Security cameras that do not move, five things asked of each | 116 ms for each | 13 ms for each, with `still=True` |
+| GPU memory | grows with the video | 6.8 GB for 16 cameras, the same after 19 minutes |
+
+HOTA is the usual score for tracking, from 0 to 100. It combines how well things are found with how well each one keeps the same number. So `Tracker` gives up a few points of accuracy and costs two fifths as much, or a quarter with EdgeTAM. It also does three things SAM 3's tracker cannot: it runs many cameras at once, it asks one camera for several things at little extra cost, and its memory does not grow with the video. [Results](https://github.com/aryamandarda/tamserve/blob/main/docs/results.md#anything-you-name) has the full tables.
+
+| if you want | do this |
+|---|---|
+| a lower cost, for a little accuracy | follow with EdgeTAM, the engine's default model: `Engine(build_video_predictor("cuda"), compile=True)` |
+| cameras that do not move to cost less | `Tracker(engine, prompts, still=True)`. A camera looks again only when its picture has changed, and is not followed while nothing moves. On security-camera video that cut the cost by two fifths and moved the answers by about a point. |
+| new things found sooner | `Tracker(engine, prompts, look_every=1)`. It costs about twice as much and does not raise accuracy. |
+| something out of sight to keep its number for longer | `Tracker(engine, prompts, hold=900)`: the number of frames a thing no look has seen is still followed. The default is 300. Everything seen in that time is still being followed, so on a busy camera a shorter hold costs less. |
+
+`Tracker` and `PeopleTracker` are add-ons. They need Meta's SAM 3, which does not come with tamserve unless you ask for it:
+
+```bash
+pip install "tamserve[sam3]"
+hf auth login  # once: SAM 3's weights are gated
+```
+
+Before the weights will download, accept Meta's licence on the [facebook/sam3](https://huggingface.co/facebook/sam3) page on Hugging Face. They are 3.5 GB and are fetched the first time a tracker starts. SAM 3 has its own licence, which is not Apache-2.0, so read it before you build on it.
+
+### Following people
+
+People are what cameras are most often asked about, so they have a tracker of their own. A `PeopleTracker` works as a `Tracker` does, with rules tuned on people: it looks five times less often, and it is both more accurate and far cheaper than SAM 3's own tracker.
 
 ```python
 from tamserve import Engine, PeopleTracker, build_video_predictor
@@ -191,7 +243,7 @@ while True:
 
 Each person gets a number, counted from 1 on each camera, and keeps it for as long as they are followed. Someone hidden for a moment, behind a door or another person, has the same number when they reappear.
 
-It works by pairing two models. SAM 3 is Meta's model that outlines whatever you name, here "person". It is accurate and slow: one look at one frame takes about 65 ms on an RTX 4090. EdgeTAM, inside the engine, cannot find anything by itself, but it follows an outline for about 4 ms a frame. So SAM 3 looks at each camera once every 15 frames, the engine follows what it found in between, and the looks are spread out so that they never all land in the same round.
+It pairs the same two models. People move slowly against the size of a picture and SAM 3 is sure of them, so one look every 15 frames is enough, and EdgeTAM, the smallest model, follows them for about 4 ms a frame.
 
 SAM 3 can also track people through a video by itself. Here are the two side by side, on one RTX 4090 and the same videos:
 
@@ -204,22 +256,13 @@ SAM 3 can also track people through a video by itself. Here are the two side by 
 | Crowded streets: accuracy (HOTA) | 77.7 | **78.3** with a look at every frame, 72.6 with the default |
 | GPU time per frame | 521 ms | 183 ms, or 44 ms with the default |
 
-HOTA is the usual score for tracking, from 0 to 100. It combines how well people are found with how well each one keeps the same number. [Results](#people) has the full tables.
+[Results](https://github.com/aryamandarda/tamserve/blob/main/docs/results.md#people) has the full tables.
 
 | if you want | do this |
 |---|---|
 | people in a crowd found sooner and swapped less | `PeopleTracker(engine, look_every=1)`. SAM 3 then looks at every frame, which costs more. The default, 15, suits rooms with a few people. |
 | someone out of sight to keep their number for longer | `PeopleTracker(engine, hold=90)`: the number of frames a person no look has seen is still followed. The default is 30. |
 | your own detector in place of SAM 3 | `PeopleTracker(engine, finder=my_detector)`: anything that takes a list of frames and returns a list of masks for each |
-
-The people tracker is an add-on. It needs Meta's SAM 3, which does not come with tamserve unless you ask for it:
-
-```bash
-pip install "tamserve[people]"
-hf auth login  # once: SAM 3's weights are gated
-```
-
-Before the weights will download, accept Meta's licence on the [facebook/sam3](https://huggingface.co/facebook/sam3) page on Hugging Face. They are 3.5 GB and are fetched the first time a `PeopleTracker` starts. SAM 3 has its own licence, which is not Apache-2.0, so read it before you build on it.
 
 ### Options
 
@@ -437,8 +480,11 @@ What tamserve does not do:
 
 - **Track backwards.** It only moves forward in time, which is all a live camera needs. Stock can also run backwards from a prompt in a recorded clip.
 - **Adjust a mask without restarting it.** Fixing a track means pointing at the object again, and tracking starts over from there. Stock also lets you add a click that nudges the current mask while keeping its history, and lets you prompt one object on several frames. tamserve has neither.
-- **Find or recognise objects, other than people.** Something else has to supply the first prompt. If an object leaves the view, its mask comes back empty, and whether it is picked up again when it returns is up to the model. `PeopleTracker` asks SAM 3 for people and nothing else. The same pairing on household objects such as phones, cups and bags reached 82 to 92% of the score of SAM 3's own tracker in our tests, which is not good enough to offer.
-- **Know a person across cameras, or after a long absence.** A `PeopleTracker` numbers people on each camera separately, and someone gone for longer than `hold` frames comes back under a new number. It runs on one engine, so one GPU: it does not work through a `Router` yet.
+- **Find things by itself, without SAM 3.** The engine follows what it is pointed at. If an object leaves the view, its mask comes back empty, and whether it is picked up again when it returns is up to the model. Finding things by name is the job of `Tracker` and `PeopleTracker`, and both need SAM 3 installed.
+- **Match SAM 3's accuracy on everything.** On people, `PeopleTracker` scores above SAM 3's own tracker. On other things `Tracker` reaches 95% of its score: SAM 3's tracker judges every frame with what it already follows as context, and a look judges one frame alone.
+- **Make a look cheaper by adding cameras.** The following is batched across cameras and the looks are not, so with `Tracker` an RTX 4090 gives about 16 frames a second in total with SAM 2.1 large and 30 with EdgeTAM, however many cameras share them: one camera at 15 or 29 frames a second, or 16 cameras at 1 or 2. `look_every` and `still` are the ways to stretch that.
+- **Know a thing across cameras, or after a long absence.** Both trackers number things on each camera separately, and something gone for longer than `hold` frames comes back under a new number. They run on one engine, so one GPU: they do not work through a `Router` yet.
+- **Follow everyone in a packed crowd.** With 90 people in every frame, `PeopleTracker` follows 72% of those in plain view. `PeopleTracker(engine, start=0.5)` raises that to 84%, and swaps numbers nearly twice as often.
 
 What to expect in practice:
 
@@ -451,7 +497,7 @@ What to expect in practice:
 ```bash
 git clone https://github.com/aryamandarda/tamserve.git && cd tamserve
 uv sync --group dev --group bench
-uv run pytest                                   # 51 tests on a CPU, 59 with two GPUs
+uv run pytest                                   # 66 tests on a CPU, 74 with two GPUs
 scripts/fetch_davis.sh                          # DAVIS 2017, 833 MB, for the accuracy benchmark
 
 uv run python bench/throughput.py --arms procs-compiled --procs 1,2,4,8                    # stock
@@ -467,7 +513,7 @@ uv pip install sam2                                # Meta's current SAM 2 code, 
 uv run python bench/throughput.py --model sam2.1-tiny --stock sam2 --arms procs-compiled --procs 1,2,4,8
 uv run python bench/accuracy.py --model sam2.1-tiny --stock sam2
 
-# PeopleTracker against SAM 3's own tracker (SAM 3's weights are gated: hf auth login first)
+# Tracker and PeopleTracker against SAM 3's own tracker (SAM 3's weights are gated: hf auth login first)
 uv pip install "sam3 @ git+https://github.com/facebookresearch/sam3@f1647e8d0c1d280991f4d1b7d974c2704537fe66" \
     "setuptools<81" einops psutil pycocotools scipy tabulate remotezip
 scripts/setup_trackeval.sh                         # the scorer
@@ -475,6 +521,10 @@ uv run python bench/people_homes.py                # the 116 home videos, a 12.7
 uv run python bench/people.py --data data/homes --compile                 # PeopleTracker
 uv run python bench/people.py --data data/homes --system sam3             # SAM 3's own tracker
 uv run python bench/people_load.py --data data/homes --compile            # cameras per GPU
+uv run python bench/named_saco.py                  # 117 of SA-Co/VEval's videos (gated too), a 30 GB stream
+uv run python bench/named.py --compile                                    # Tracker
+uv run python bench/named.py --system sam3                                # SAM 3's own tracker
+uv run python bench/people_load.py --data data/saco --compile --prompts 4 --model sam2.1-large   # cameras per GPU
 ```
 
 The stock arms need NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark starts and stops itself. `--stock sam2-vos` uses the compiled mode that ships with Meta's code, which needs PyTorch 2.5.1; `--stock sam2` compiles Meta's code the way the other stock is compiled and runs on current PyTorch.
@@ -485,7 +535,7 @@ The stock arms need NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark 
 |---|---|
 | [`src/tamserve/engine.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/engine.py) | the engine: batching, per-object memory, compiling |
 | [`src/tamserve/router.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/router.py), [`worker.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/worker.py), [`wire.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/wire.py) | cameras spread over several GPUs: placing them, the worker on each GPU, and how router and workers on other machines talk |
-| [`src/tamserve/people.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/people.py) | finding people with SAM 3 and following them on the engine |
+| [`src/tamserve/tracker.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/tracker.py), [`people.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/people.py) | finding what you name with SAM 3 and following it on the engine; the same for people |
 | [`src/tamserve/models.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/models.py) | fetching, checking and loading EdgeTAM and SAM 2.1 |
 | [`src/tamserve/reference.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/reference.py), [`compare.py`](https://github.com/aryamandarda/tamserve/blob/main/src/tamserve/compare.py) | the stock predictor as a reference, and mask comparison |
 | [`tests/`](https://github.com/aryamandarda/tamserve/tree/main/tests/) | bit-for-bit checks against stock; objects joining, leaving and restarting |
@@ -502,4 +552,4 @@ The stock arms need NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark 
 
 Created by [**Aryaman Darda**](https://github.com/aryamandarda).
 
-tamserve is Apache-2.0. It runs [EdgeTAM](https://github.com/facebookresearch/EdgeTAM) and [SAM 2.1](https://github.com/facebookresearch/sam2) by Meta, both Apache-2.0, which it downloads and does not redistribute. Accuracy is measured on [DAVIS 2017](https://davischallenge.org/), which is for research use; check its licence before using it for anything else. The demo's footage is from [Pexels](https://www.pexels.com), under the Pexels licence; sources are listed in [docs/demo.md](https://github.com/aryamandarda/tamserve/blob/main/docs/demo.md).
+tamserve is Apache-2.0. It runs [EdgeTAM](https://github.com/facebookresearch/EdgeTAM) and [SAM 2.1](https://github.com/facebookresearch/sam2) by Meta, both Apache-2.0, which it downloads and does not redistribute. Accuracy is measured on [DAVIS 2017](https://davischallenge.org/), which is for research use; check its licence before using it for anything else. `Tracker` and `PeopleTracker` call Meta's [SAM 3](https://github.com/facebookresearch/sam3), which has its own licence and is only installed and downloaded when you ask for it. They are scored on [SA-Co/VEval](https://huggingface.co/datasets/facebook/SACo-VEval), [BURST](https://github.com/Ali2500/BURST-benchmark), [MOTS20 and MOT20](https://motchallenge.net/) and [MEVA](https://mevadata.org) (CC BY 4.0), each under its own terms. The demo's footage is from [Pexels](https://www.pexels.com), under the Pexels licence; sources are listed in [docs/demo.md](https://github.com/aryamandarda/tamserve/blob/main/docs/demo.md).

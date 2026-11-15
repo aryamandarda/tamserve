@@ -40,7 +40,10 @@ build-backend = "hatchling.build"
 [tool.uv]
 # SAM 3 holds NumPy below 2.4. Resolved apart from the development tools, so the tests keep
 # running on the newest NumPy, which is what a plain `pip install tamserve` gets.
-conflicts = [[{ extra = "sam3" }, { group = "dev" }, { group = "bench" }]]
+conflicts = [  # one pair each: in a single list, dev and bench would exclude each other too
+    [{ extra = "sam3" }, { group = "dev" }],
+    [{ extra = "sam3" }, { group = "bench" }],
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tamserve"]

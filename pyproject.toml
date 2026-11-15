@@ -1,7 +1,7 @@
 [project]
 name = "tamserve"
 version = "0.3.0"
-description = "Live, multi-camera tracking with SAM 2 and EdgeTAM, on one GPU or many: one model per GPU serves every camera."
+description = "Live, multi-camera tracking with SAM 2 and EdgeTAM, on one GPU or many: point at things or name them, and one model per GPU follows them on every camera."
 license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.10"

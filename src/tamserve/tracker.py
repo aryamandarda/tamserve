@@ -188,7 +188,8 @@ class Tracker:
         Engine(build_video_predictor("cuda", "sam2.1-large")).
     prompts: what to find. One phrase ("dog"), several (["dog", "ball"]), or a dict
         that gives each camera its own. Several prompts on a camera cost far less than
-        that many cameras: its picture is encoded once for all of them.
+        that many cameras: its picture is encoded once for all of them. `prompts` can
+        be changed while running; a camera takes its new ones up at its next look.
     finder: what finds the objects. By default SAM 3 (Finder), compiled if the engine
         is. Anything that can be called as Finder is and sets `scores` and `names` as
         it does will do.
@@ -268,6 +269,8 @@ class Tracker:
         found = self.finder([frames[c] for c in looking], wanted) if looking else []
         for k, c in enumerate(looking):
             cam = self.cameras[c]
+            for t in [t for t, name in cam.name.items() if name not in wanted[k]]:
+                self._forget(c, t)  # the camera is no longer asked for it
             for prompt in wanted[k]:  # each prompt's outlines meet only that prompt's objects
                 mine = [i for i, name in enumerate(self.finder.names[k]) if name == prompt]
                 outlines, sure = self._distinct([found[k][i] for i in mine], [self.finder.scores[k][i] for i in mine])

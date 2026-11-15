@@ -93,6 +93,21 @@ def test_each_camera_can_have_its_own_prompts(pred):
         tracker.step({"unnamed": f})
 
 
+def test_prompts_can_change_while_running(pred):
+    frames = _frames(96, 128, 12, TWO)
+    tracker = Tracker(Engine(pred), {"cam": "red"}, finder=ColourFinder(), look_every=3)
+    for f in frames[:4]:
+        assert list(tracker.step({"cam": f})["cam"]) == [1]
+    tracker.prompts["cam"] = ["red", "yellow"]
+    for f in frames[4:8]:
+        out = tracker.step({"cam": f})["cam"]
+    assert tracker.names("cam") == {1: "red", 2: "yellow"} and sorted(out) == [1, 2]
+    tracker.prompts["cam"] = "yellow"
+    for f in frames[8:]:
+        out = tracker.step({"cam": f})["cam"]
+    assert tracker.names("cam") == {2: "yellow"} and sorted(out) == [2] and ("cam", 1) not in tracker.engine.tracks
+
+
 def test_a_repeated_outline_does_not_start_a_second_object(pred):
     frames = _frames(96, 128, 6, TWO[:1])
     tracker = _tracker(pred, ColourFinder(twice=True), look_every=3)

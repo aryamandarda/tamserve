@@ -93,16 +93,15 @@ class Timed:
     def __init__(self, finder):
         self.finder, self.seconds, self.looks = finder, 0.0, 0
 
-    def __call__(self, frames):
+    def __call__(self, frames, *prompts):
         t = clock(DEVICE)
-        out = self.finder(frames)
+        out = self.finder(frames, *prompts)
         self.seconds += clock(DEVICE) - t
         self.looks += len(frames)
         return out
 
-    @property
-    def scores(self):
-        return self.finder.scores
+    def __getattr__(self, name):  # scores, names
+        return getattr(self.finder, name)
 
 
 def run_people(args, seqs, train):
@@ -136,7 +135,7 @@ def run_people(args, seqs, train):
                    "peak_gpu_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2)}
 
 
-def run_sam3(args, seqs, train):
+def run_sam3(args, seqs, train, prompts=None):
     from sam3.model_builder import build_sam3_video_predictor
 
     predictor = build_sam3_video_predictor(checkpoint_path=args.sam3)
@@ -151,7 +150,8 @@ def run_sam3(args, seqs, train):
                                                 offload_state_to_cpu=True,
                                                 resource_path=str(train / s / "img1")))["session_id"]
             t = clock(DEVICE)
-            predictor.handle_request(dict(type="add_prompt", session_id=sid, frame_index=0, text="person"))
+            predictor.handle_request(dict(type="add_prompt", session_id=sid, frame_index=0,
+                                          text=prompts[s] if prompts else "person"))
             for r in predictor.handle_stream_request(dict(type="propagate_in_video", session_id=sid)):
                 o = r["outputs"]
                 tracks = {int(i): m for i, m in zip(o["out_obj_ids"], o["out_binary_masks"])}
@@ -195,9 +195,15 @@ def score(name, lines, seqs, data, out_dir):
         "TRACKERS_TO_EVAL": [name], "SEQMAP_FILE": str(seqmap), "PRINT_CONFIG": False})
     res, _ = evaluator.evaluate([mots], [trackeval.metrics.HOTA(), trackeval.metrics.CLEAR(),
                                          trackeval.metrics.Identity()])
-    r = res["MOTSChallenge"][name]["COMBINED_SEQ"]["pedestrian"]
-    return {**{k: round(float(np.mean(r["HOTA"][k])) * 100, 2) for k in ("HOTA", "DetA", "AssA")},
-            "IDF1": round(float(r["Identity"]["IDF1"]) * 100, 2), "IDSW": int(r["CLEAR"]["IDSW"])}
+
+    def summary(r):
+        r = r["pedestrian"]
+        # DetRe and DetPr: the share of what is there that is found, and of what is found that is there
+        return {**{k: round(float(np.mean(r["HOTA"][k])) * 100, 2) for k in ("HOTA", "DetA", "AssA", "DetRe", "DetPr")},
+                "IDF1": round(float(r["Identity"]["IDF1"]) * 100, 2), "IDSW": int(r["CLEAR"]["IDSW"])}
+
+    per = res["MOTSChallenge"][name]
+    return {**summary(per["COMBINED_SEQ"]), "per_sequence": {s: summary(per[s])["HOTA"] for s in seqs}}
 
 
 def main():

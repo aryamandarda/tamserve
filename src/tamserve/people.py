@@ -20,24 +20,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from tamserve.tracker import Finder, _first_pick, _match
+from tamserve.finder import PeopleFinder
+from tamserve.tracker import _first_pick, _match
 
 _SAME = 0.3  # overlap (IoU) from which a found outline and a followed person are the same person
-
-
-class PeopleFinder(Finder):
-    """Every person in a frame, outlined by SAM 3: Finder, asked for "person".
-
-    threshold: the confidence, 0 to 1, below which SAM 3's outlines are ignored.
-    """
-
-    def __init__(self, *, checkpoint: str | None = None, threshold: float = 0.4, compile: str | None = None,
-                 device=None):
-        super().__init__(checkpoint=checkpoint, threshold=threshold, compile=compile, device=device)
-
-    def __call__(self, frames: list) -> list:
-        """frames: H x W x 3 uint8 RGB arrays. Returns, for each, a list of bool masks."""
-        return super().__call__(frames, [["person"]] * len(frames))
 
 
 @dataclass

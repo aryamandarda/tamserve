@@ -3,7 +3,7 @@
 [`media/tamserve-demo.mp4`](media/tamserve-demo.mp4), 32 seconds. Recorded through a `Router` with one worker
 on one RTX 4090, with EdgeTAM compiled. Every mask, frame rate, delay and status on screen is read from the
 recordings. Only the GPU memory scene repeats numbers measured separately, from the
-[README](../README.md#results).
+[README](../README.md#why-tamserve).
 
 ## What is on screen
 

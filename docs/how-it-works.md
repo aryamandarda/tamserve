@@ -223,6 +223,8 @@ its frame rate ([results.md](results.md#sam-21)).
 
 ## Several GPUs
 
+Using a router is covered in [several-gpus.md](several-gpus.md). This is how it is built.
+
 A `Router` places cameras on workers, one per GPU, and a camera stays where it is
 put, because its objects' memory lives on that GPU. Each worker opens and decodes
 its own cameras: moving decoded frames between processes cost more than tracking
@@ -359,6 +361,19 @@ scores every frame with the objects it already follows as context, and that is
 where the last few points of accuracy are: looking more often does not recover
 them, because recall rises and precision falls by as much.
 
+## Where the code is
+
+| path | what is there |
+|---|---|
+| [`src/tamserve/engine.py`](../src/tamserve/engine.py) | the engine: batching, per-object memory, compiling |
+| [`src/tamserve/router.py`](../src/tamserve/router.py), [`worker.py`](../src/tamserve/worker.py), [`wire.py`](../src/tamserve/wire.py) | cameras spread over several GPUs: placing them, the worker on each GPU, and how router and workers on other machines talk |
+| [`src/tamserve/tracker.py`](../src/tamserve/tracker.py), [`people.py`](../src/tamserve/people.py) | following what you name on the engine, and deciding what to keep from each look; the same for people |
+| [`src/tamserve/finder.py`](../src/tamserve/finder.py) | the look itself: the one file that calls SAM 3 |
+| [`src/tamserve/models.py`](../src/tamserve/models.py) | fetching, checking and loading EdgeTAM and SAM 2.1 |
+| [`src/tamserve/reference.py`](../src/tamserve/reference.py), [`compare.py`](../src/tamserve/compare.py) | the stock predictor as a reference, and mask comparison |
+| [`tests/`](../tests/) | bit-for-bit checks against stock; objects joining, leaving and restarting |
+| [`bench/`](../bench/) | the scripts behind every number here |
+
 ## Where the model code comes from
 
 EdgeTAM is not published as a package, so on first use tamserve downloads its
@@ -408,3 +423,8 @@ or that anyone can write to. The code is stored under the package name
 - The timings are from one RTX 4090. The two tuning choices made from them, CUDA
   graphs for calls of one or two rows and encoder pieces of 4, are safe on any
   GPU but may not be the fastest choice on another.
+- The lead over stock comes from work the engine skips, so it should carry over
+  to other GPUs, but it has only been measured on that one card. GPUs without
+  hardware support for bf16, such as the T4 that Colab gives for free, are far
+  slower than their age suggests: there the quickstart notebook tracks 7 frames
+  a second, and one look by SAM 3 takes 3 seconds.

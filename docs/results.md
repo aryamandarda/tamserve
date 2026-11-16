@@ -855,3 +855,40 @@ its settings were chosen on:
 | a small model, taught by SAM 3 on each camera, to say when to look | it missed 6 of 32 new objects. A look whenever the picture changes sees 93% of them within 3 frames. |
 | a pruned copy of SAM 3's image encoder (DART, 16 of its 32 blocks) as the finder | 3 to 7 HOTA lower; the full encoder looking every 5th frame beats it looking every 3rd, at the same cost |
 | EfficientSAM3's small models as the finder | 17 to 30 HOTA lower, for a look 2.1 to 2.7 times cheaper |
+
+## Reproducing the numbers
+
+```bash
+git clone https://github.com/aryamandarda/tamserve.git && cd tamserve
+uv sync --group dev --group bench
+uv run pytest                                   # 67 tests on a CPU, 74 with two GPUs
+scripts/fetch_davis.sh                          # DAVIS 2017, 833 MB, for the accuracy benchmark
+
+uv run python bench/throughput.py --arms procs-compiled --procs 1,2,4,8                    # stock
+uv run python bench/throughput.py --arms engine-procs --procs 1 --sizes 1,2,4,8,16,32,64   # tamserve
+uv run python bench/accuracy.py --compile best     # add --model sam2.1-tiny and so on
+uv run python bench/memory.py
+uv run python bench/engine_profile.py --stages
+uv run --with opencv-python-headless python bench/live.py --video your-video.mp4   # the live loop
+uv run --with opencv-python-headless python bench/router.py --video your-video.mp4 --gpus 0,1   # several GPUs
+# and over other machines: --workers host:port,... --token-file token --source rtsp://camera-address
+
+uv pip install sam2                                # Meta's current SAM 2 code, for the SAM 2.1 comparison
+uv run python bench/throughput.py --model sam2.1-tiny --stock sam2 --arms procs-compiled --procs 1,2,4,8
+uv run python bench/accuracy.py --model sam2.1-tiny --stock sam2
+
+# Tracker and PeopleTracker against SAM 3's own tracker (SAM 3's weights are gated: hf auth login first)
+uv pip install "sam3 @ git+https://github.com/facebookresearch/sam3@f1647e8d0c1d280991f4d1b7d974c2704537fe66" \
+    "setuptools<81" einops psutil pycocotools scipy tabulate remotezip
+scripts/setup_trackeval.sh                         # the scorer
+uv run python bench/people_homes.py                # the 116 home videos, a 12.7 GB download
+uv run python bench/people.py --data data/homes --compile                 # PeopleTracker
+uv run python bench/people.py --data data/homes --system sam3             # SAM 3's own tracker
+uv run python bench/people_load.py --data data/homes --compile            # cameras per GPU
+uv run python bench/named_saco.py                  # 117 of SA-Co/VEval's videos (gated too), a 30 GB stream
+uv run python bench/named.py --compile                                    # Tracker
+uv run python bench/named.py --system sam3                                # SAM 3's own tracker
+uv run python bench/people_load.py --data data/saco --compile --prompts 4 --model sam2.1-large   # cameras per GPU
+```
+
+The stock arms need NVIDIA MPS (`nvidia-cuda-mps-control`), which the benchmark starts and stops itself. `--stock sam2-vos` uses the compiled mode that ships with Meta's code, which needs PyTorch 2.5.1; `--stock sam2` compiles Meta's code the way the other stock is compiled and runs on current PyTorch.

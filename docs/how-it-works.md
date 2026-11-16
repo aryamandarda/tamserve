@@ -141,7 +141,7 @@ made a step 4 to 7% faster and nearly halved GPU memory at 64 cameras (9.4 GB to
 ### Compiling
 
 `compile=True` runs the four modules through `torch.compile`, which fuses small
-kernels into fewer, tuned ones. Four things had to be solved for that to work on
+kernels into fewer, tuned ones. Five things had to be solved for that to work on
 a batch whose size changes whenever an object comes or goes:
 
 - **A few sizes only.** Compiled code is specific to its tensor sizes. The
@@ -157,6 +157,12 @@ a batch whose size changes whenever an object comes or goes:
 - **One layout per size.** How a tensor is laid out in memory depends on how the
   batch was cut, and the compiler compiles again for every layout it meets. The
   engine hands compiled modules compact copies.
+- **One setting for float32 arithmetic.** Compiled code is tied to PyTorch's
+  setting for multiplying float32 matrices (exact, or the faster TF32 format),
+  and is compiled again the first time it runs after that setting changes. Other
+  code changes it: importing SAM 3 turns TF32 on for the whole process. The
+  engine puts the setting back as it was when it compiled for the length of each
+  step, then returns the caller's.
 - **Two kinds of compiled code.** A CUDA graph records a module's kernels once
   and replays them with a single launch. With one or two rows, where launching
   is the limit, that is the difference between 130 and 220 frames per second at

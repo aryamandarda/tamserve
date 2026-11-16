@@ -7,7 +7,7 @@ from PIL import Image
 
 from tamserve.compare import compare
 from tamserve.models import build_video_predictor
-from tamserve.engine import Box, Clicks, Engine, prepare
+from tamserve.engine import Box, Clicks, Engine, _matmul, prepare
 from tamserve.reference import track
 
 
@@ -343,6 +343,25 @@ def test_edges(pred, tmp_path):
     # The predictor is shared with stock: a step must leave its modules as they were.
     for mod in (pred.sam_prompt_encoder, pred.image_encoder.neck.position_encoding):
         assert "forward" not in vars(mod)
+
+
+def test_a_step_runs_under_the_matmul_setting_the_engine_compiled_with(pred, tmp_path):
+    # torch.compile compiles again whenever this setting changes, and importing SAM 3 changes it.
+    _, seeds, frames = _video(tmp_path / "v", 96, 128, 2, [(40, 40, 14, 1, 2, (220, 40, 40))], seed=5)
+    engine, seen = Engine(pred), []
+    engine._matmul = _matmul()  # what _compile() records
+    track = engine._track
+    engine._track = lambda *a: seen.append(_matmul()) or track(*a)
+    outside = torch.backends.cuda.matmul.allow_tf32
+    try:
+        engine.step({"cam": frames[0]}, {"cam": seeds})
+        torch.backends.cuda.matmul.allow_tf32 = not outside  # as another library would
+        changed = _matmul()
+        engine.step({"cam": frames[1]})
+        assert seen == [engine._matmul] and changed != engine._matmul
+        assert _matmul() == changed  # and the caller has its own setting back
+    finally:
+        _matmul(engine._matmul)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")

@@ -52,8 +52,10 @@ frame rate and delay on screen is read from the recordings.
   is why the camera sends 30 frames a second and about 20 are tracked.
 - **The words.** The typing is drawn afterwards. Each word finishes on screen at the moment `tracker.prompts` was set in
   the recording.
-- **Not compiled.** A compiled engine pauses the first few times a tracker meets a new number of objects
-  ([Limits](../README.md#limits)), and those pauses would have fallen inside these few seconds.
+- **Not compiled.** In 0.3.0 a compiled engine paused the first few times a tracker met a new number of objects, and
+  those pauses would have fallen inside these few seconds. 0.3.1 fixes that. On another RTX 4090 machine, with a slower
+  CPU, 0.3.1 tracked the warehouse camera at 17 frames/s with one prompt and 14 with two when not compiled, and at 22
+  and 18 when compiled.
 - **The picture.** Each mask is drawn on the frame it was computed from. The frame rate counts the rounds finished in
   the previous second.
 

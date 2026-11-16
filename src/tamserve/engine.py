@@ -103,6 +103,18 @@ def _each(fn, x):
     return type(x)(_each(fn, v) for v in x) if isinstance(x, (list, tuple)) else x
 
 
+def _matmul(to=None):
+    """PyTorch's setting for float32 matrix multiplication (exact, or the faster TF32),
+    which is set to `to` when given. Returns what it was. Newer PyTorch keeps three
+    states, older ones an on/off switch."""
+    mm = torch.backends.cuda.matmul
+    name = "fp32_precision" if hasattr(mm, "fp32_precision") else "allow_tf32"
+    was = getattr(mm, name)
+    if to is not None and to != was:
+        setattr(mm, name, to)
+    return was
+
+
 def _version(t):
     """Counts in-place writes to `t`; None for inference tensors, which have no count."""
     return None if t.is_inference() else t._version
@@ -142,7 +154,8 @@ class Engine:
         module sees only a few sizes, and all of them are compiled here so that no
         later step stalls: about 20 minutes the first time on a machine for True,
         under 3 for "default", and 1 to 2 once PyTorch has them cached on disk.
-        Seeding stays uncompiled.
+        Seeding stays uncompiled. A compiled engine keeps PyTorch's float32 matmul
+        setting (torch.set_float32_matmul_precision) as it was when it was built.
     gpu_masks: return masks on the GPU instead of copying them to the CPU.
     """
 
@@ -176,6 +189,7 @@ class Engine:
         # ...and the forward each had on the instance (usually none), to put back.
         self._was: dict = {mod: vars(mod).get("forward") for mod in self._fast}
         self._attention = None  # stock's attention module, once compiled
+        self._matmul = None  # the float32 matmul setting the modules were compiled under
         self.compiled = bool(compile)
         if compile:
             self._compile(compile)
@@ -183,6 +197,7 @@ class Engine:
     def _compile(self, mode):
         from tamserve_sam2.modeling.sam import transformer
 
+        self._matmul = _matmul()
         self._warm(2)  # uncompiled first: fills position encodings the modules cache
         # Stock pins its attention kernel through a context manager the compiler cannot
         # trace, which cuts the mask decoder into 18 graphs and memory attention into 8.
@@ -336,6 +351,9 @@ class Engine:
         # abandons the recording. It waits until the step is over.
         collecting = gc.isenabled()
         gc.disable()
+        # Compiled code is compiled again if the matmul setting has changed since, and
+        # other code changes it: importing SAM 3 does. A step runs under its own.
+        outside = _matmul(self._matmul)
         try:
             with precision(self.device.type, self.bf16):
                 feats, pos, sizes, cols = self._encode([frames[c][0] for c in busy], reuse)
@@ -349,6 +367,7 @@ class Engine:
                 return self._outputs(low, hw, out)
         finally:
             self._use(False)  # the predictor is shared: leave it as stock has it
+            _matmul(outside)
             if collecting:
                 gc.enable()
 

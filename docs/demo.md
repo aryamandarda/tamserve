@@ -36,6 +36,27 @@ recordings. Only the GPU memory scene repeats numbers measured separately, from 
   camera's frame rate counts its updates over the previous two seconds; the total counts the previous
   second.
 
+## The naming clip
+
+[`media/tamserve-name-it.mp4`](media/tamserve-name-it.mp4), 17 seconds: a `Tracker` on one live camera at a time, on one
+RTX 4090, with tamserve 0.3.0 as installed from PyPI. SAM 3 finds what is named and EdgeTAM follows it. Every mask, name,
+frame rate and delay on screen is read from the recordings.
+
+| scene | what was recorded |
+|---|---|
+| Warehouse | The camera starts with nothing asked of it. `tracker.prompts = ["forklift"]` is set 0.7 s in, and the forklift in view has its first mask 0.16 s later. The second forklift drives into view and has its first mask at 1.13 s, with nobody pointing at it. "person" is added at 4.5 s, and both drivers have masks 0.12 s later. The camera is tracked at 23 frames/s with one prompt and 18 with two, with a median of 37 and 31 ms from a frame arriving to its masks. |
+| Office | The same on another camera: "person" at 0.7 s, "glasses" at 3.0 s and "plant" at 5.2 s. Three people, two pairs of glasses and a plant each have a mask within 0.16 s of being asked for. The camera is tracked at 22, 19 and 15 frames/s as it is asked for one, two and three things. |
+
+- **The camera.** Each clip is played as a live camera, as above: frame k is due k/30 seconds after the start, a thread
+  decodes it, and the loop takes the newest frame each round. Frames that arrive while the GPU is busy are skipped, which
+  is why the camera sends 30 frames a second and about 20 are tracked.
+- **The words.** The typing is drawn afterwards. Each word finishes on screen at the moment `tracker.prompts` was set in
+  the recording.
+- **Not compiled.** A compiled engine pauses the first few times a tracker meets a new number of objects
+  ([Limits](../README.md#limits)), and those pauses would have fallen inside these few seconds.
+- **The picture.** Each mask is drawn on the frame it was computed from. The frame rate counts the rounds finished in
+  the previous second.
+
 ## Footage
 
 Seven clips from [Pexels](https://www.pexels.com), used under the

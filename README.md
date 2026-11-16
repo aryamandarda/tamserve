@@ -178,6 +178,12 @@ engine.add(frames, {"yard": {"dog": Box(300, 380, 420, 470)}})  # frames: the on
 
 Everything above starts from someone pointing at the thing. A `Tracker` takes words instead. Give it a phrase, or several, and it finds every match on every camera, follows each one, picks up new ones as they appear and lets go of those that leave.
 
+<div align="center">
+<a href="https://github.com/aryamandarda/tamserve/blob/main/docs/media/tamserve-name-it.mp4"><img src="https://raw.githubusercontent.com/aryamandarda/tamserve/main/docs/media/name-it.gif" width="880" alt="One live camera in a warehouse. The word forklift is set and the forklift in view is masked. A second forklift drives in and is masked by itself. The word person is added and both drivers are masked"></a>
+
+<sub>One live camera on one RTX 4090. The words are set while it runs, and nobody points at anything. <a href="https://github.com/aryamandarda/tamserve/blob/main/docs/media/tamserve-name-it.mp4">Watch the 17-second clip</a>, read <a href="https://github.com/aryamandarda/tamserve/blob/main/docs/demo.md#the-naming-clip">how it was recorded</a>, or <a href="https://colab.research.google.com/github/aryamandarda/tamserve/blob/main/notebooks/tracking_by_name.ipynb">try it in Colab</a>.</sub>
+</div>
+
 ```python
 from tamserve import Engine, Tracker, build_video_predictor
 
@@ -490,7 +496,8 @@ What to expect in practice:
 
 - **More objects cost more.** The speeds on this page are for one object per camera. Each extra object adds about 2.4 ms to a round. In the demo, one GPU kept six live cameras with 9 objects at a full 30 frames/s each, 180 in total, decoding included.
 - **The first compiled start takes about 20 minutes.** After that it is about 95 seconds, as long as PyTorch's cache of compiled code is still there. A new machine or a fresh container starts from scratch. `compile="default"` is ready in under 3 minutes.
-- **Other GPUs will give other numbers.** Nothing in tamserve is tied to the RTX 4090. It runs on any NVIDIA GPU that PyTorch supports, compiling included, because the compile step tunes itself to whatever card it starts on. You will get the same masks. You will not get the same speeds, since every figure here comes from one 4090, and with one or two cameras the frame rate also depends on how fast the CPU is. The lead over stock comes from work the engine skips, so it should carry over, but it has only been measured on this one card.
+- **A compiled engine pauses the first few times a tracker meets a new number of objects.** Starting something with a box or a click never pauses. A `Tracker` or a `PeopleTracker` on a compiled engine does, the first time it follows one thing, the first time it follows three, and so on: 3 to 56 seconds each in one run, 105 seconds in all, and nothing after that. Without `compile` there are no pauses.
+- **Other GPUs will give other numbers.** Nothing in tamserve is tied to the RTX 4090. It runs on any NVIDIA GPU that PyTorch supports, compiling included, because the compile step tunes itself to whatever card it starts on. You will get the same masks. You will not get the same speeds, since every figure here comes from one 4090, and with one or two cameras the frame rate also depends on how fast the CPU is. The lead over stock comes from work the engine skips, so it should carry over, but it has only been measured on this one card. Older GPUs without hardware support for the number format the models run in (bf16), such as the T4 that Colab gives for free, are far slower than their age suggests: there the quickstart notebook tracks 7 frames a second, and one look by SAM 3 takes 3 seconds.
 
 ## Reproducing the numbers
 

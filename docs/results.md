@@ -861,7 +861,7 @@ its settings were chosen on:
 ```bash
 git clone https://github.com/aryamandarda/tamserve.git && cd tamserve
 uv sync --group dev --group bench
-uv run pytest                                   # 73 tests on a CPU, 81 with a GPU
+uv run pytest                                   # 74 tests on a CPU, 82 with a GPU
 scripts/fetch_davis.sh                          # DAVIS 2017, 833 MB, for the accuracy benchmark
 
 uv run python bench/throughput.py --arms procs-compiled --procs 1,2,4,8                    # stock

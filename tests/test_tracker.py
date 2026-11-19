@@ -1,3 +1,5 @@
+import sys
+
 import numpy as np
 import pytest
 import torch
@@ -275,6 +277,12 @@ def test_a_camera_that_changes_resolution_starts_afresh(pred):
         tracker.step({"cam": f})
     out = tracker.step({"cam": _frames(80, 112, 1, TWO[:1])[0]})["cam"]
     assert list(out) == [1] and out[1].shape == (80, 112)
+
+
+def test_without_sam3_a_tracker_says_how_to_install_it(pred, monkeypatch):
+    monkeypatch.setitem(sys.modules, "sam3", None)  # as where SAM 3 is not installed
+    with pytest.raises(ModuleNotFoundError, match=r'pip install "tamserve\[sam3\]"'):
+        Tracker(Engine(pred), "red")
 
 
 def test_bad_settings_are_rejected(pred):

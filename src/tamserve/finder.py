@@ -33,8 +33,16 @@ class Finder:
 
     def __init__(self, *, checkpoint: str | None = None, threshold: float = 0.5, compile: str | None = None,
                  device=None):
-        from sam3.model.sam3_image_processor import Sam3Processor
-        from sam3.model_builder import build_sam3_image_model
+        try:
+            from sam3.model.sam3_image_processor import Sam3Processor
+            from sam3.model_builder import build_sam3_image_model
+        except ModuleNotFoundError as e:
+            if (e.name or "").split(".")[0] != "sam3":
+                raise  # SAM 3 is there and something it needs is not
+            raise ModuleNotFoundError(
+                'Tracker and PeopleTracker find things with Meta\'s SAM 3, which is not installed: '
+                'pip install "tamserve[sam3]". Its weights are gated: accept the licence at '
+                'https://huggingface.co/facebook/sam3 and run `hf auth login` once.', name="sam3") from None
 
         from tamserve.models import CACHE, _download
 

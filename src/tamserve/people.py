@@ -15,13 +15,12 @@ if a look sees them again. After that they are forgotten.
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from tamserve.finder import PeopleFinder
-from tamserve.tracker import _first_pick, _match
+from tamserve.tracker import _due, _first_pick, _interval, _match
 
 _SAME = 0.3  # overlap (IoU) from which a found outline and a followed person are the same person
 
@@ -46,7 +45,8 @@ class PeopleTracker:
         each mask from its latest call, they are used as `start` describes.
     look_every: frames between a camera's looks. 15 suits rooms with a few people.
         In a crowd, people are found sooner and swapped less with a smaller number,
-        at a higher cost.
+        at a higher cost. A dict gives cameras their own, such as {"plaza": 1}, and
+        those it does not name keep 15. It can be changed while running.
     hold: frames a person the finder no longer sees is still followed, out of the
         answer, in case a look sees them again.
     start: the confidence an outline needs to start following someone new. Weaker
@@ -54,9 +54,11 @@ class PeopleTracker:
         already followed, after the confident ones have had first pick.
     """
 
-    def __init__(self, engine, *, finder=None, look_every: int = 15, hold: int = 30, start: float = 0.7):
-        if look_every < 1 or hold < 0:
-            raise ValueError("look_every must be at least 1 and hold at least 0")
+    def __init__(self, engine, *, finder=None, look_every: int | dict = 15, hold: int = 30, start: float = 0.7):
+        for c in look_every if isinstance(look_every, dict) else [None]:
+            _interval(look_every, c)  # raises below 1
+        if hold < 0:
+            raise ValueError("hold must be at least 0")
         if engine.gpu_masks:
             raise ValueError("PeopleTracker needs an engine that returns masks on the CPU (gpu_masks=False)")
         self.engine = engine
@@ -82,7 +84,8 @@ class PeopleTracker:
                 self.drop(c)  # the camera changed resolution: start it afresh
                 cam = self.cameras.setdefault(c, _Camera())
             cam.size = f.shape[:2]
-        looking = self._due(list(frames))
+        every = {c: _interval(self.look_every, c, 15) for c in self.cameras}
+        looking = _due(self.cameras, list(frames), every)
         # Uploaded and resized once: the same tensors serve the pass that follows people
         # and the pass that starts them on a look frame, so a look frame is encoded once.
         ready = self.engine._prepared(frames, [c for c in frames if self.cameras[c].people or c in looking])
@@ -110,7 +113,7 @@ class PeopleTracker:
                 self.engine.drop(c, t)
                 del cam.people[t], cam.unseen[t]
             if cam.since_look is None:  # first look: set this camera's later looks apart from the others'
-                cam.since_look = self._joined % self.look_every
+                cam.since_look = self._joined % every[c]
                 self._joined += 1
             else:
                 cam.since_look = 0
@@ -133,12 +136,3 @@ class PeopleTracker:
             return outlines, _match(people, outlines, _SAME, device)
         kept, ids = _first_pick(people, outlines, confidence, self.start, _SAME, device)
         return [outlines[i] for i in kept], ids
-
-    def _due(self, cams):
-        """Cameras that look this step. A camera's first frame is always looked at: who is
-        on it should not wait their turn. After that the most overdue go first, about
-        cameras / look_every per step, so looks do not all land at once."""
-        new = [c for c in cams if self.cameras[c].since_look is None]
-        due = [c for c in cams if (self.cameras[c].since_look or 0) >= self.look_every]
-        due.sort(key=lambda c: -self.cameras[c].since_look)
-        return new + due[:max(1, math.ceil(len(self.cameras) / self.look_every))]

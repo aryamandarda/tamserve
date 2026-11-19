@@ -65,6 +65,33 @@ def _colour_of(frame, mask):
     return frame[mask.numpy()].mean(0)
 
 
+class Watching(ColourFinder):
+    """Also notes which cameras each look took: a camera's frames carry its number in their first pixel."""
+
+    def __call__(self, frames, *prompts):
+        self.seen = [int(f[0, 0, 0]) for f in frames]
+        return super().__call__(frames, *prompts)
+
+
+def _looks(tracker, frames, cams):
+    """Step the tracker through the frames on cameras numbered `cams`: which of them looked on each step."""
+    looks = []
+    for f in frames:
+        tracker.finder.seen, numbered = [], {}
+        for c in cams:
+            numbered[c] = f.copy()
+            numbered[c][0, 0] = c
+        tracker.step(numbered)
+        looks.append(tracker.finder.seen)
+    return looks
+
+
+def _gaps(looks, cam):
+    """Frames between a camera's looks, from its second on: its first two are set apart from other cameras'."""
+    at = [i for i, step in enumerate(looks) if cam in step]
+    return {b - a for a, b in zip(at[1:], at[2:])}
+
+
 def _tracker(pred, finder, look_every, prompts=("red", "yellow"), **kw):
     return Tracker(Engine(pred), list(prompts), finder=finder, look_every=look_every, **kw)
 
@@ -175,6 +202,45 @@ def test_looks_are_spread_across_cameras(pred):
     assert sum(finder.calls) == 6 + 2 * 8
 
 
+def test_each_camera_can_have_its_own_look_every(pred):
+    tracker = _tracker(pred, Watching(), look_every={0: 1, 1: 6})  # camera 2 keeps 3
+    looks = _looks(tracker, _frames(64, 96, 20, [(20, 20, 8, 0, 2, RED, 0, 99)]), [0, 1, 2])
+    assert sorted(looks[0]) == [0, 1, 2]  # every camera's first frame is looked at
+    assert [_gaps(looks, c) for c in (0, 1, 2)] == [{1}, {6}, {3}]
+
+
+def test_a_dict_that_gives_every_camera_one_number_looks_as_that_number_does(pred):
+    frames = _frames(64, 96, 12, [])
+    as_number = _looks(_tracker(pred, Watching(), look_every=3), frames, range(5))
+    assert as_number == _looks(_tracker(pred, Watching(), look_every=dict.fromkeys(range(5), 3)), frames, range(5))
+
+
+def test_look_every_can_change_while_running(pred):
+    frames = _frames(64, 96, 12, [])
+    tracker = _tracker(pred, Watching(), look_every={0: 6})
+    looks = _looks(tracker, frames[:4], [0])
+    tracker.look_every[0] = 1
+    looks += _looks(tracker, frames[4:8], [0])
+    tracker.look_every = 2
+    looks += _looks(tracker, frames[8:], [0])
+    assert [len(step) for step in looks] == [1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1]
+    tracker.look_every = {0: 0}
+    with pytest.raises(ValueError):
+        tracker.step({0: frames[0]})
+
+
+def test_cameras_that_look_most_often_do_not_wait_behind_the_others(pred):
+    every = {0: 1, 1: 1, **dict.fromkeys(range(2, 8), 30)}
+    tracker = _tracker(pred, Watching(), look_every=every)
+    frames = _frames(64, 96, 8, [])
+    looks = _looks(tracker, frames[:2], range(8))
+    for c in range(2, 8):
+        every[c] = 3  # six cameras fall due at once
+    looks += _looks(tracker, frames[2:], range(8))
+    assert all(len(step) <= 4 and {0, 1} <= set(step) for step in looks[1:])  # 2 + 6 / 3 looks a step
+    assert sorted(c for step in looks[2:5] for c in step if c > 1) == [2, 3, 4, 5, 6, 7]  # the six take turns
+
+
 def test_a_still_camera_looks_rarely_and_is_not_followed(pred):
     frames = _frames(96, 128, 40, [(30, 24, 12, 0, 0, RED, 0, 99)])
     finder = ColourFinder()
@@ -212,7 +278,7 @@ def test_a_camera_that_changes_resolution_starts_afresh(pred):
 
 
 def test_bad_settings_are_rejected(pred):
-    for kw in ({"look_every": 0}, {"hold": -1}):
+    for kw in ({"look_every": 0}, {"look_every": {"cam": 0}}, {"hold": -1}):
         with pytest.raises(ValueError):
             Tracker(Engine(pred), "red", finder=ColourFinder(), **kw)
     with pytest.raises(ValueError):

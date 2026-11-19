@@ -305,6 +305,12 @@ about cameras / `look_every` per step, the most overdue camera first, so they do
 not all land on one step. Making new cameras wait their turn as well cost 2.9
 HOTA on the home videos: people on a camera's first frames went unseen.
 
+**Cameras can have their own `look_every`.** `look_every={"plaza": 1}` looks at
+that camera on every frame and leaves the rest at 15. The ration is then the sum
+of one over each camera's interval, and the cameras that look most often go
+first, so a camera set to 1 never waits behind the others. `Tracker` takes the
+same dict.
+
 **Looks are not batched.** SAM 3's image encoder is pure arithmetic on a full
 GPU, so two frames in one call take as long as two calls.
 

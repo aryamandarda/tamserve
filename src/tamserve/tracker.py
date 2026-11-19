@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from fractions import Fraction
 
 import numpy as np
 import torch
@@ -93,6 +94,26 @@ def _moved(a, b) -> bool:
     return bool((np.abs(a - b).max(-1) > _MOVED).any())
 
 
+def _interval(look_every, cam, default=None):
+    """Frames between a camera's looks: `look_every`, or that camera's own where it is a dict."""
+    every = look_every.get(cam, default) if isinstance(look_every, dict) else look_every
+    if every < 1:
+        raise ValueError("look_every must be at least 1")
+    return every
+
+
+def _due(cameras: dict, cams: list, every: dict, changed=lambda c: True) -> list:
+    """Cameras that look this step. A camera's first frame is always looked at: what is
+    on it should not wait its turn. After that a camera is due `every[camera]` frames
+    after its last look, and no more look in one step than those intervals call for on
+    average, so looks do not all land at once. Those that look most often go first,
+    then the most overdue."""
+    new = [c for c in cams if cameras[c].since_look is None]
+    due = [c for c in cams if (cameras[c].since_look or 0) >= every[c] and changed(c)]
+    due.sort(key=lambda c: (every[c], -cameras[c].since_look))
+    return new + due[:max(1, math.ceil(sum(1 / Fraction(k) for k in every.values())))]
+
+
 @dataclass
 class _Camera:
     objects: dict = field(default_factory=dict)  # object id -> its latest mask
@@ -122,7 +143,9 @@ class Tracker:
         is. Anything that can be called as Finder is and sets `scores` and `names` as
         it does will do.
     look_every: frames between a camera's looks. Looking more often finds things
-        sooner at a higher cost; it does not raise accuracy.
+        sooner at a higher cost; it does not raise accuracy. A dict gives cameras
+        their own, such as {"dock": 1}, and those it does not name keep 3. Like
+        `prompts`, it can be changed while running.
     hold: frames an object no look has seen is still followed before it is forgotten.
     start: the confidence an outline needs to start following something new. Weaker
         outlines, down to the finder's own threshold, can only confirm an object
@@ -133,17 +156,18 @@ class Tracker:
         something always moves.
     """
 
-    def __init__(self, engine, prompts, *, finder=None, look_every: int = 3, hold: int = 300, start: float = 0.7,
-                 still: bool = False):
-        if look_every < 1 or hold < 0:
-            raise ValueError("look_every must be at least 1 and hold at least 0")
+    def __init__(self, engine, prompts, *, finder=None, look_every: int | dict = 3, hold: int = 300,
+                 start: float = 0.7, still: bool = False):
+        for c in look_every if isinstance(look_every, dict) else [None]:
+            _interval(look_every, c)  # raises below 1
+        if hold < 0:
+            raise ValueError("hold must be at least 0")
         if engine.gpu_masks:
             raise ValueError("Tracker needs an engine that returns masks on the CPU (gpu_masks=False)")
         self.engine, self.prompts = engine, prompts
         self.finder = finder if finder is not None else Finder(
             device=engine.device, compile="default" if engine.compiled else None)
         self.look_every, self.hold, self.start, self.still = look_every, hold, start, still
-        self._misses = max(1, math.ceil(_MISSED * (_TRIAL // look_every)))  # looks, of a trial's
         self.cameras: dict = {}
         self._joined = 0  # cameras that have had their first look
 
@@ -168,7 +192,9 @@ class Tracker:
                 cam = self.cameras.setdefault(c, _Camera())
             cam.size = f.shape[:2]
         thumbs = {c: _thumbnail(f) for c, f in frames.items()} if self.still else {}
-        looking = self._due(list(frames), thumbs)
+        every = {c: _interval(self.look_every, c, 3) for c in self.cameras}
+        looking = _due(self.cameras, list(frames), every,
+                       lambda c: not self.still or self._changed(self.cameras[c], thumbs[c]))
         follow = [c for c in frames if self.cameras[c].objects]
         if self.still:
             for c in list(follow):
@@ -197,6 +223,7 @@ class Tracker:
         found = self.finder([frames[c] for c in looking], wanted) if looking else []
         for k, c in enumerate(looking):
             cam = self.cameras[c]
+            misses = max(1, math.ceil(_MISSED * (_TRIAL // every[c])))  # looks, of a trial's
             for t in [t for t, name in cam.name.items() if name not in wanted[k]]:
                 self._forget(c, t)  # the camera is no longer asked for it
             for prompt in wanted[k]:  # each prompt's outlines meet only that prompt's objects
@@ -214,14 +241,14 @@ class Tracker:
                     cam.unseen[t] = 0
                 for t in [t for t in live if t not in ids.values() and cam.frame - cam.born[t] <= _TRIAL]:
                     cam.missed[t] = cam.missed.get(t, 0) + 1
-                    if cam.missed[t] >= self._misses:  # a new object the looks keep missing was a false find
+                    if cam.missed[t] >= misses:  # a new object the looks keep missing was a false find
                         self._forget(c, t)
             for t in [t for t, n in cam.unseen.items() if n > self.hold]:
                 self._forget(c, t)
             if self.still:
                 cam.looked = thumbs[c]
             if cam.since_look is None:  # first look: set this camera's later looks apart from the others'
-                cam.since_look = self._joined % self.look_every
+                cam.since_look = self._joined % every[c]
                 self._joined += 1
             else:
                 cam.since_look = 0
@@ -264,13 +291,3 @@ class Tracker:
         if any(cam.frame - born < _TRIAL for born in cam.born.values()):
             return True  # something new is on trial, and only looks can judge it
         return _moved(thumb, cam.looked)
-
-    def _due(self, cams, thumbs):
-        """Cameras that look this step. A camera's first frame is always looked at: what is
-        on it should not wait its turn. After that the most overdue go first, about
-        cameras / look_every per step, so looks do not all land at once."""
-        new = [c for c in cams if self.cameras[c].since_look is None]
-        due = [c for c in cams if (self.cameras[c].since_look or 0) >= self.look_every
-               and (not self.still or self._changed(self.cameras[c], thumbs[c]))]
-        due.sort(key=lambda c: -self.cameras[c].since_look)
-        return new + due[:max(1, math.ceil(len(self.cameras) / self.look_every))]

@@ -220,6 +220,7 @@ HOTA is the usual score for tracking, from 0 to 100. It combines how well things
 | a lower cost, for a little accuracy | follow with EdgeTAM, the engine's default model: `Engine(build_video_predictor("cuda"), compile=True)` |
 | cameras that do not move to cost less | `Tracker(engine, prompts, still=True)`. A camera looks again only when its picture has changed, and is not followed while nothing moves. On security-camera video that cut the cost by two fifths and moved the answers by about a point. |
 | new things found sooner | `Tracker(engine, prompts, look_every=1)`. It costs about twice as much and does not raise accuracy. |
+| a quiet camera to cost less | `Tracker(engine, prompts, look_every={"storeroom": 15})`. That camera is looked at every 15th frame, so new things on it are found later, and the cameras not named keep 3. The dict can be changed while running. |
 | something out of sight to keep its number for longer | `Tracker(engine, prompts, hold=900)`: the number of frames a thing no look has seen is still followed. The default is 300. Everything seen in that time is still being followed, so on a busy camera a shorter hold costs less. |
 
 `Tracker` and `PeopleTracker` are add-ons. They need Meta's SAM 3, which does not come with tamserve unless you ask for it:
@@ -267,6 +268,7 @@ SAM 3 can also track people through a video by itself. Here are the two side by 
 | if you want | do this |
 |---|---|
 | people in a crowd found sooner and swapped less | `PeopleTracker(engine, look_every=1)`. SAM 3 then looks at every frame, which costs more. The default, 15, suits rooms with a few people. |
+| one crowded camera beside quiet ones | `PeopleTracker(engine, look_every={"plaza": 1})`. Only that camera is looked at on every frame, and the cameras not named keep 15. The dict can be changed while running. |
 | someone out of sight to keep their number for longer | `PeopleTracker(engine, hold=90)`: the number of frames a person no look has seen is still followed. The default is 30. |
 | your own detector in place of SAM 3 | `PeopleTracker(engine, finder=my_detector)`: anything that takes a list of frames and returns a list of masks for each |
 

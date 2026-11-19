@@ -51,6 +51,33 @@ def _colour_of(frame, mask):
     return frame[mask.numpy()].mean(0)
 
 
+class Watching(ColourFinder):
+    """Also notes which cameras each look took: a camera's frames carry its number in their first pixel."""
+
+    def __call__(self, frames, *prompts):
+        self.seen = [int(f[0, 0, 0]) for f in frames]
+        return super().__call__(frames, *prompts)
+
+
+def _looks(tracker, frames, cams):
+    """Step the tracker through the frames on cameras numbered `cams`: which of them looked on each step."""
+    looks = []
+    for f in frames:
+        tracker.finder.seen, numbered = [], {}
+        for c in cams:
+            numbered[c] = f.copy()
+            numbered[c][0, 0] = c
+        tracker.step(numbered)
+        looks.append(tracker.finder.seen)
+    return looks
+
+
+def _gaps(looks, cam):
+    """Frames between a camera's looks, from its second on: its first two are set apart from other cameras'."""
+    at = [i for i, step in enumerate(looks) if cam in step]
+    return {b - a for a, b in zip(at[1:], at[2:])}
+
+
 def _tracker(pred, finder, look_every, **kw):
     return PeopleTracker(Engine(pred), finder=finder, look_every=look_every, **kw)
 
@@ -126,6 +153,27 @@ def test_looks_are_spread_across_cameras(pred):
     assert sum(finder.calls) == 6 + 2 * 8
 
 
+def test_each_camera_can_have_its_own_look_every(pred):
+    tracker = _tracker(pred, Watching(), look_every={0: 1, 1: 4})  # camera 2 keeps 15
+    looks = _looks(tracker, _frames(64, 96, 30, []), [0, 1, 2])
+    assert sorted(looks[0]) == [0, 1, 2]  # every camera's first frame is looked at
+    assert [_gaps(looks, c) for c in (0, 1, 2)] == [{1}, {4}, {15}]
+
+
+def test_look_every_can_change_while_running(pred):
+    frames = _frames(64, 96, 12, [])
+    tracker = _tracker(pred, Watching(), look_every={0: 6})
+    looks = _looks(tracker, frames[:4], [0])
+    tracker.look_every[0] = 1
+    looks += _looks(tracker, frames[4:8], [0])
+    tracker.look_every = 2
+    looks += _looks(tracker, frames[8:], [0])
+    assert [len(step) for step in looks] == [1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1]
+    tracker.look_every = {0: 0}
+    with pytest.raises(ValueError):
+        tracker.step({0: frames[0]})
+
+
 def test_an_empty_camera_costs_nothing_between_looks(pred):
     tracker = _tracker(pred, ColourFinder(), look_every=5)
     for f in _frames(64, 96, 6, []):
@@ -142,7 +190,7 @@ def test_a_camera_that_changes_resolution_starts_afresh(pred):
 
 
 def test_bad_settings_are_rejected(pred):
-    for kw in ({"look_every": 0}, {"hold": -1}):
+    for kw in ({"look_every": 0}, {"look_every": {"cam": 0}}, {"hold": -1}):
         with pytest.raises(ValueError):
             PeopleTracker(Engine(pred), finder=ColourFinder(), **kw)
     with pytest.raises(ValueError):

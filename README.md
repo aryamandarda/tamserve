@@ -29,7 +29,7 @@ Point at what to track, or name it ("dog", "the red mug") and tamserve finds it.
 
 The models are excellent. The code that comes with them was made for editing one recorded video, and the usual way to put it on several cameras is to run a separate copy of the model for each one. Memory piles up with every copy and with every minute of video.
 
-tamserve does what LLM servers such as vLLM do for chat: every camera shares one copy of the model, and whatever needs the GPU at a given moment goes through it together. That turns out to be faster as well as lighter, and because the model itself is not touched, the results are the same.
+tamserve does what LLM servers such as vLLM do for chat: every camera shares one copy of the model, and whatever needs the GPU at a given moment goes through it together. That turns out to be faster as well as lighter, and because the model itself is not touched, it is just as accurate.
 
 | | the model's own code | tamserve |
 |---|---|---|
@@ -73,7 +73,7 @@ Four words come up a lot below:
 pip install tamserve
 ```
 
-You need Python 3.10 or newer and an NVIDIA GPU. It does run on a CPU, which is handy for trying it out but much too slow for live video.
+You need Python 3.10 or newer and an NVIDIA GPU. It does run on a CPU, which is handy for trying it out but much too slow for live video. Tracking by name needs `pip install "tamserve[sam3]"` and Meta's SAM 3, as [described below](#following-what-you-name).
 
 The first time you load a model, tamserve downloads it into `~/.cache/tamserve`, so that run needs an internet connection. EdgeTAM is 54 MB. The download is pinned to one version and verified before any of it is loaded.
 
@@ -234,7 +234,7 @@ Before the weights will download, accept Meta's licence on the [facebook/sam3](h
 
 ### Following people
 
-People are what cameras are most often asked about, so they have a tracker of their own. A `PeopleTracker` works as a `Tracker` does, with rules tuned on people: it looks five times less often, and it is both more accurate and far cheaper than SAM 3's own tracker.
+People are what cameras are most often asked about, so they have a tracker of their own. A `PeopleTracker` works as a `Tracker` does, with rules tuned on people: it looks five times less often, and on home videos it is both more accurate and far cheaper than SAM 3's own tracker.
 
 ```python
 from tamserve import Engine, PeopleTracker, build_video_predictor
@@ -355,7 +355,7 @@ What tamserve does not do:
 - **Track backwards.** It only moves forward in time, which is all a live camera needs. Stock can also run backwards from a prompt in a recorded clip.
 - **Adjust a mask without restarting it.** Fixing a track means pointing at the object again, and tracking starts over from there. Stock can also nudge a mask with an extra click, or take prompts on several frames.
 - **Find things by itself, without SAM 3.** The engine follows what it is pointed at, and when an object leaves the view its mask comes back empty. Finding things by name is the job of `Tracker` and `PeopleTracker`, and both need SAM 3 installed.
-- **Match SAM 3's accuracy on everything.** On people, `PeopleTracker` scores above SAM 3's own tracker. On other things `Tracker` reaches 95% of its score.
+- **Match SAM 3's accuracy on everything.** On people at home `PeopleTracker` scores above SAM 3's own tracker, and in a crowd only when it looks at every frame. On other things `Tracker` reaches 95% of its score.
 - **Make a look cheaper by adding cameras.** The following is batched across cameras and the looks are not. So with `Tracker` an RTX 4090 tracks about 30 frames a second in total with EdgeTAM and 16 with SAM 2.1 large, however many cameras share them: six cameras at 5 frames a second each with EdgeTAM, or three with SAM 2.1 large. `look_every` and `still` are the ways to stretch that.
 - **Know a thing across cameras, or after a long absence.** Both trackers number things on each camera separately, and something gone for longer than `hold` frames comes back under a new number. They run on one engine, so one GPU: they do not work through a `Router` yet.
 - **Follow everyone in a packed crowd.** With 90 people in every frame, `PeopleTracker` follows 72% of those in plain view. `PeopleTracker(engine, start=0.5)` raises that to 84%, and swaps numbers nearly twice as often.
@@ -364,7 +364,7 @@ What to expect in practice:
 
 - **More objects cost more.** The speeds on this page are for one object per camera, and each extra object adds about 2.4 ms to a round.
 - **The first compiled start takes about 20 minutes.** After that it is about 95 seconds, as long as PyTorch's cache of compiled code is still there. `compile="default"` is ready in under 3 minutes.
-- **Other GPUs will give other numbers.** tamserve runs on any NVIDIA GPU that PyTorch supports and gives the same masks there, but every speed on this page comes from one RTX 4090. Older GPUs without hardware support for bf16, the number format the models run in, are far slower than their age suggests: on the T4 that Colab gives for free, one look by SAM 3 takes 3 seconds.
+- **Other GPUs will give other numbers.** tamserve runs on any NVIDIA GPU that PyTorch supports, but every speed on this page comes from one RTX 4090. Older GPUs without hardware support for bf16, the number format the models run in, are far slower than their age suggests: on the T4 that Colab gives for free, one look by SAM 3 takes 3 seconds.
 
 ## Read more
 

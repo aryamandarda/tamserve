@@ -248,7 +248,7 @@ def test_a_still_camera_looks_rarely_and_is_not_followed(pred):
     finder = ColourFinder()
     tracker = _tracker(pred, finder, look_every=2, still=True)
     steps = []
-    tracker.engine.step = lambda ready, step=tracker.engine.step: steps.append(len(ready)) or step(ready)
+    tracker.engine.step = lambda ready, step=tracker.engine.step, **kw: steps.append(len(ready)) or step(ready, **kw)
     outs = [tracker.step({"cam": f})["cam"] for f in frames]
     assert all(sorted(o) == [1] for o in outs)
     assert len(finder.calls) <= 9   # every frame of the object's trial, then every 30th

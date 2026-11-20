@@ -319,7 +319,7 @@ class Engine:
         if not self.tracks:
             self._last = None  # free the cached features
 
-    def step(self, frames: dict, seeds: dict | None = None, *, soon: dict | None = None) -> dict:
+    def step(self, frames: dict, seeds: dict | None = None, *, next_frames: dict | None = None) -> dict:
         """One batched pass: every object on every camera here advances one frame.
 
         frames: camera id -> the frame as a decoder gives it (an H x W x 3 uint8
@@ -327,9 +327,10 @@ class Engine:
             prepare() output.
         seeds: camera id -> {object id: bool mask, Box or Clicks}: objects that
             start on this frame, or start again if they are already followed.
-        soon: the frames the next step() will be given, when they are already known
-            (a recorded video, or a camera read one frame ahead). On a Mac they are
-            encoded on the Neural Engine while the GPU works on this step's; the
+        next_frames: camera id -> the frame the next step() will be given, for the
+            cameras where you already have it (a recorded video, or a camera read
+            one frame ahead). On a Mac the Neural Engine starts on those frames now,
+            while the GPU finishes this step, which is most of a Mac's speed. The
             masks returned are still this step's. Elsewhere it changes nothing.
         Returns camera id -> {object id: bool mask at the frame's own size}.
         """

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from tamserve import Engine, build_video_predictor, prepare
+from tamserve import Engine, PeopleTracker, Tracker, build_video_predictor, prepare
 from tamserve.apple import AppleEngine
 
 RED, YELLOW = (220, 40, 40), (240, 220, 60)
@@ -66,13 +66,14 @@ def test_with_the_models_own_features_the_masks_are_the_engines(pred):
         _same(plain.step({"cam": prepare(f)}, start), apple.step({"cam": f}, start))
 
 
-def test_frames_given_as_soon_are_encoded_once_and_change_no_mask(pred):
+def test_next_frames_are_encoded_once_and_change_no_mask(pred):
     frames, seeds = _frames(8)
     waiting, ahead = AppleEngine(pred, encoder=OwnEncoder(pred)), AppleEngine(pred, encoder=OwnEncoder(pred))
     for k, f in enumerate(frames):
         start = {"cam": seeds} if k == 0 else None
-        soon = {"cam": frames[k + 1]} if k + 1 < len(frames) else None
-        _same(waiting.step({"cam": f}, start), ahead.step({"cam": f}, start, soon=soon))
+        # A copy: the next frame is known by its pixels, not by being the same array.
+        coming = {"cam": frames[k + 1].copy()} if k + 1 < len(frames) else None
+        _same(waiting.step({"cam": f}, start), ahead.step({"cam": f}, start, next_frames=coming))
     assert ahead._neural.frames == waiting._neural.frames == len(frames)
 
 
@@ -80,9 +81,41 @@ def test_a_frame_other_than_the_one_promised_is_still_the_one_followed(pred):
     frames, seeds = _frames(4)
     plain, apple = Engine(pred), AppleEngine(pred, encoder=OwnEncoder(pred))
     _same(plain.step({"cam": prepare(frames[0])}, {"cam": seeds}),
-          apple.step({"cam": frames[0]}, {"cam": seeds}, soon={"cam": frames[3]}))
+          apple.step({"cam": frames[0]}, {"cam": seeds}, next_frames={"cam": frames[3]}))
     _same(plain.step({"cam": prepare(frames[1])}), apple.step({"cam": frames[1]}))
     assert apple._neural.frames == 3  # frames 0 and 1, and the promised one that never came
+
+
+def test_a_next_frame_written_over_afterwards_is_not_mistaken_for_the_new_one(pred):
+    frames, seeds = _frames(3)
+    plain, apple = Engine(pred), AppleEngine(pred, encoder=OwnEncoder(pred))
+    buffer = frames[1].copy()  # a decoder that reuses one array for every frame
+    _same(plain.step({"cam": prepare(frames[0])}, {"cam": seeds}),
+          apple.step({"cam": frames[0]}, {"cam": seeds}, next_frames={"cam": buffer}))
+    buffer[:] = frames[2]
+    _same(plain.step({"cam": prepare(frames[2])}), apple.step({"cam": buffer}))
+
+
+class DiscFinder:
+    """Stands in for SAM 3 for either tracker: outlines the red disc and the yellow one, whatever is asked for."""
+
+    def __call__(self, frames, prompts=None):
+        found = [[torch.from_numpy(np.abs(f.astype(int) - np.array(c)).sum(-1) < 60) for c in (RED, YELLOW)]
+                 for f in frames]
+        self.scores, self.names = [[0.9, 0.9] for _ in frames], [["disc", "disc"] for _ in frames]
+        return found
+
+
+@pytest.mark.parametrize("tracker", [lambda engine: Tracker(engine, "disc", finder=DiscFinder()),
+                                     lambda engine: PeopleTracker(engine, finder=DiscFinder())])
+def test_the_trackers_pass_next_frames_on(pred, tracker):
+    frames, _ = _frames(8)
+    waiting = tracker(AppleEngine(pred, encoder=OwnEncoder(pred)))
+    ahead = tracker(AppleEngine(pred, encoder=OwnEncoder(pred)))
+    for k, f in enumerate(frames):
+        coming = {"cam": frames[k + 1]} if k + 1 < len(frames) else None
+        _same(waiting.step({"cam": f}), ahead.step({"cam": f}, next_frames=coming))
+    assert ahead.engine._neural.frames == waiting.engine._neural.frames == len(frames)
 
 
 def test_an_object_can_start_on_the_frame_just_stepped(pred):
@@ -125,8 +158,8 @@ def test_the_neural_engine_tracks_as_the_gpu_does():
     for k, f in enumerate(frames):
         start = {"cam": seeds} if k == 0 else None
         want, got = gpu.step({"cam": f}, start)["cam"], neural.step({"cam": f}, start)["cam"]
-        soon = {"cam": frames[k + 1]} if k + 1 < len(frames) else None
-        _same({"cam": got}, ahead.step({"cam": f}, start, soon=soon))
+        coming = {"cam": frames[k + 1]} if k + 1 < len(frames) else None
+        _same({"cam": got}, ahead.step({"cam": f}, start, next_frames=coming))
         for obj in (1, 2):
             both = (want[obj] & got[obj]).sum() / (want[obj] | got[obj]).sum()
             assert both > 0.9, (k, obj, float(both))

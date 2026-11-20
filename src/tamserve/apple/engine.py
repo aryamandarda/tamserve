@@ -12,8 +12,8 @@ class AppleEngine(Engine):
     """Engine, on an Apple-silicon Mac. Made by Engine(predictor) when it can be; not built directly.
 
     A frame handed to step() goes to the Neural Engine and the GPU waits for its
-    features. Frames passed as `soon` start on the Neural Engine at once, while the
-    GPU follows objects on the current ones, and that is where the speed is: 40
+    features. Frames passed as `next_frames` start on the Neural Engine at once, while
+    the GPU follows objects on the current ones, and that is where the speed is: 40
     frames a second with one camera on an M4 Max, against 22 with everything on the
     GPU. Frames from prepare() are encoded on the GPU, as stock encodes them.
     """
@@ -30,15 +30,15 @@ class AppleEngine(Engine):
                 self._pos_enc = Engine._backbone(self, [blank])["vision_pos_enc"]
         finally:
             self._use(False)
-        self._ahead: dict = {}  # id(frame) -> (the frame, what _prepared gives for it), for frames passed as `soon`
-        self._soon = None       # the `soon` of the step() under way, until its frames have been started
+        self._ahead: dict = {}  # camera -> (a copy of the frame given as its next, what _prepared gives for it)
+        self._next = None       # the `next_frames` of the step() under way, until they have been started
 
-    def step(self, frames: dict, seeds: dict | None = None, *, soon: dict | None = None) -> dict:
-        self._soon = soon or {}
+    def step(self, frames: dict, seeds: dict | None = None, *, next_frames: dict | None = None) -> dict:
+        self._next = next_frames or {}
         try:
             return super().step(frames, seeds)
         finally:
-            self._soon = None
+            self._next = None
 
     def _prepared(self, frames, busy):
         out = {}
@@ -47,14 +47,19 @@ class AppleEngine(Engine):
             if isinstance(frame, tuple):  # prepare() output
                 out[c] = frame
                 continue
-            known = self._ahead.get(id(frame))
-            out[c] = known[1] if known is not None and known[0] is frame else self._start(c, frame)
-        if self._soon is not None:  # after this step's own frames, so those are encoded first
+            ahead = self._ahead.pop(c, None)
+            # Known by its pixels: the caller may hand over another array, or have written over the one it gave.
+            came = ahead is not None and np.asarray(frame).dtype == np.uint8 and np.array_equal(ahead[0], frame)
+            out[c] = ahead[1] if came else self._start(c, frame)
+        if self._next is not None:  # after this step's own frames, so those are encoded first
             followed = {cam for cam, _ in self.tracks}
-            # Frames given as `soon` earlier that the caller did not come back with are dropped here.
-            self._ahead = {id(f): (f, self._start(c, f)) for c, f in self._soon.items()
-                           if (c in followed or c in busy) and not isinstance(f, tuple)}
-            self._soon = None
+            # Earlier next frames that did not come are dropped here. Each is copied: it is read after step() returns.
+            self._ahead = {}
+            for c, frame in self._next.items():
+                if (c in followed or c in busy) and not isinstance(frame, tuple):
+                    frame = np.array(frame)
+                    self._ahead[c] = (frame, self._start(c, frame))
+            self._next = None
         return out
 
     def _start(self, cam, frame):

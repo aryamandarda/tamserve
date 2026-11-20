@@ -73,9 +73,11 @@ class PeopleTracker:
         self.cameras.pop(cam, None)
         self.engine.drop(cam)
 
-    def step(self, frames: dict) -> dict:
+    def step(self, frames: dict, *, next_frames: dict | None = None) -> dict:
         """frames: camera id -> the frame as a decoder gives it (an H x W x 3 uint8 RGB
-        array). Returns camera id -> {person id: bool mask at the frame's own size}.
+        array). next_frames: the frames the next step() will be given, where you already
+        have them; a Mac starts on them early (Engine.step). Returns camera id ->
+        {person id: bool mask at the frame's own size}.
         Ids are whole numbers from 1, counted per camera."""
         frames = {c: np.asarray(f) for c, f in frames.items()}
         for c, f in frames.items():
@@ -91,7 +93,8 @@ class PeopleTracker:
         ready = self.engine._prepared(frames, [c for c in frames if self.cameras[c].people or c in looking])
 
         # The engine predicts this frame for every person on every camera, in one batch.
-        for c, masks in self.engine.step({c: ready[c] for c in frames if self.cameras[c].people}).items():
+        following = {c: ready[c] for c in frames if self.cameras[c].people}
+        for c, masks in self.engine.step(following, next_frames=next_frames).items():
             cam = self.cameras[c]
             for t, m in masks.items():
                 cam.people[t] = m

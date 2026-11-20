@@ -294,20 +294,11 @@ def _stand_in_for_transformers(calls):
         def from_pretrained(cls, name):
             return cls()
 
-        def __call__(self, images=None, text=None, return_tensors=None):
-            if images is not None:
-                return _Batch(pixel_values=torch.from_numpy(np.asarray(images)))
+        def __call__(self, text, return_tensors):
             return _Batch(input_ids=text, attention_mask=torch.ones(1))
 
-        def post_process_instance_segmentation(self, out, threshold, mask_threshold, target_sizes):
-            picture, colour = out
-            m = (picture.int() - torch.tensor(COLOURS[colour])).abs().sum(-1) < 60
-            assert list(m.shape) == target_sizes[0]
-            found = m.sum() > 20 and 0.9 >= threshold
-            return [{"masks": m[None] if found else m[:0], "scores": torch.full((int(found),), 0.9)}]
-
     class Sam3Model:
-        dtype = torch.uint8
+        dtype = torch.float32
 
         @classmethod
         def from_pretrained(cls, name, torch_dtype=None):
@@ -327,8 +318,12 @@ def _stand_in_for_transformers(calls):
             calls.append(input_ids)
             return input_ids
 
-        def __call__(self, vision_embeds, text_embeds, attention_mask):
-            return vision_embeds, text_embeds
+        def __call__(self, vision_embeds, text_embeds, attention_mask, input_boxes, input_boxes_labels):
+            assert input_boxes.shape == (1, 1, 4) and input_boxes_labels.tolist() == [[-10]]  # one box, ignored
+            picture = (vision_embeds[0].permute(1, 2, 0).float() + 1) * 127.5  # back from -1..1 to 0..255
+            m = (picture - torch.tensor(COLOURS[text_embeds])).abs().sum(-1) < 60
+            sure = torch.tensor([[4.0 if m.sum() > 20 else -4.0]])  # as scores before they are squashed to 0..1
+            return _Batch(pred_logits=sure, presence_logits=torch.tensor([[4.0]]), pred_masks=m[None, None] * 8.0 - 4)
 
     module = type(sys)("transformers")
     module.Sam3Model, module.Sam3Processor = Sam3Model, Sam3Processor

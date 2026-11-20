@@ -12,10 +12,13 @@ the same weights.
 from __future__ import annotations
 
 import importlib.util
+import sys
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
+from torchvision.transforms.v2.functional import resize
 
 # The word list SAM 3 reads prompts with. Its PyPI package leaves the file out, so it is
 # fetched once from Meta's repository and checked against this SHA-256.
@@ -23,6 +26,8 @@ _VOCAB = ("https://raw.githubusercontent.com/facebookresearch/sam3/f1647e8d0c1d2
           "/sam3/assets/bpe_simple_vocab_16e6.txt.gz",
           "924691ac288e54409236115652ad4aa250f48203de50a9e4722a6ecd48d6804a")
 
+
+_SIDE = 1008  # SAM 3 works on a square picture of this many pixels a side
 
 _MISSING = ("Tracker and PeopleTracker find things with Meta's SAM 3, which is not installed: "
             'pip install "tamserve[sam3]". Its weights are gated: accept the licence at '
@@ -41,24 +46,32 @@ class _Hub:
         self.model = Sam3Model.from_pretrained(name, torch_dtype=kind).to(device).eval()
         self.processor = Sam3Processor.from_pretrained(name)
         self.threshold, self.device, self.words = threshold, device, {}
+        # Meta's code puts every prompt through its box encoder, boxes or not, and this one skips that for words
+        # alone, which moves confidences a long way. One box marked "ignore" (-10) has it run as Meta's does.
+        self.no_box = {"input_boxes": torch.zeros(1, 1, 4, device=device, dtype=kind),
+                       "input_boxes_labels": torch.full((1, 1), -10, device=device)}
 
     def look(self, frame, wanted):
         """(masks, their confidences, the prompt each was found for) for one frame."""
-        picture = self.processor(images=Image.fromarray(frame), return_tensors="pt").to(self.device)
+        # Resized as Meta's code resizes it, not by the processor here: the two differ enough to move confidences.
+        picture = resize(torch.from_numpy(frame).to(self.device).permute(2, 0, 1), [_SIDE, _SIDE]) / 127.5 - 1
         # The picture is encoded once, whatever the number of prompts: most of a look.
-        seen = self.model.get_vision_features(pixel_values=picture.pixel_values.to(self.model.dtype))
+        seen = self.model.get_vision_features(pixel_values=picture[None].to(self.model.dtype))
         masks, scores, names = [], [], []
         for prompt in wanted:
             if prompt not in self.words:
                 text = self.processor(text=prompt, return_tensors="pt").to(self.device)
                 self.words[prompt] = (self.model.get_text_features(**text), text.attention_mask)
             words, attention = self.words[prompt]
-            out = self.model(vision_embeds=seen, text_embeds=words, attention_mask=attention)
-            got = self.processor.post_process_instance_segmentation(
-                out, threshold=self.threshold, mask_threshold=0.5, target_sizes=[list(frame.shape[:2])])[0]
-            masks += list(got["masks"].bool().cpu())
-            scores += got["scores"].float().cpu().tolist()
-            names += [prompt] * (len(masks) - len(names))
+            out = self.model(vision_embeds=seen, text_embeds=words, attention_mask=attention, **self.no_box)
+            # Scored and cut as Meta's code does it: masks are enlarged to the frame before they are thresholded.
+            sure = (out.pred_logits[0].sigmoid() * out.presence_logits[0].sigmoid()).float()
+            keep = sure > self.threshold
+            if keep.any():
+                big = F.interpolate(out.pred_masks[0][keep][None].float(), frame.shape[:2], mode="bilinear")[0]
+                masks += list((big > 0).cpu())
+                scores += sure[keep].cpu().tolist()
+                names += [prompt] * (len(masks) - len(names))
         return masks, scores, names
 
 
@@ -89,7 +102,9 @@ class Finder:
             except ModuleNotFoundError as e:
                 if (e.name or "").split(".")[0] != "transformers":
                     raise  # it is there and something it needs is not
-                raise ModuleNotFoundError(_MISSING, name="sam3") from None
+                # On Linux the extra installs Meta's package, which needs an NVIDIA GPU.
+                more = " Without an NVIDIA GPU, also: pip install transformers." if sys.platform == "linux" else ""
+                raise ModuleNotFoundError(_MISSING + more, name="sam3") from None
             return
         try:
             from sam3.model.sam3_image_processor import Sam3Processor

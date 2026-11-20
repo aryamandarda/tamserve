@@ -28,7 +28,7 @@ _RELEASE = "https://github.com/aryamandarda/tamserve/releases/download/apple-enc
 # model -> (where its converted encoder is, the SHA-256 of that file)
 ENCODERS = {
     "edgetam": (_RELEASE + "edgetam-encoder.mlpackage.zip",
-                "0ef456b9cb4e9d8a89833c9563e011ef738e840cc2980bd0f0dcd1fa3fe3b77d"),
+                "0a7c62f0b772bc5f1b41e3618b52458a9c529959adcda91c5975a50f5237b753"),
 }
 
 

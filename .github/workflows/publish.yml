@@ -11,6 +11,8 @@ permissions: {}
 
 jobs:
   build:
+    # Only version releases. Other releases hold files tamserve downloads, such as the encoder for Macs.
+    if: startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     permissions:
       contents: read

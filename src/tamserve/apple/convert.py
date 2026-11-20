@@ -20,11 +20,24 @@ import torch
 
 from tamserve.apple.encoder import SIZE
 from tamserve.engine import _MEAN, _STD
-from tamserve.models import build_video_predictor
+from tamserve.models import EDGETAM_REF, build_video_predictor, edgetam_root
+
+# Goes into the archive beside EdgeTAM's licence: the file is a changed copy of Meta's work, handed on.
+NOTICE = f"""EdgeTAM's image encoder, converted to Core ML
+
+This archive holds the image encoder of EdgeTAM (https://github.com/facebookresearch/EdgeTAM, commit
+{EDGETAM_REF}), Copyright (c) Meta Platforms, Inc. and affiliates, under the Apache License, Version 2.0.
+The licence is in the file LICENSE.
+
+Changed from the original: the encoder alone was taken from EdgeTAM's released weights and converted to
+Apple's Core ML format in 16-bit numbers, with the model's own pixel normalisation built in, by tamserve
+(https://github.com/aryamandarda/tamserve): python -m tamserve.apple.convert edgetam. Nothing was retrained.
+"""
 
 
 def convert(model: str, out: Path) -> str:
-    """Write the model's encoder to `out` (a .zip holding edgetam-encoder.mlpackage); returns its SHA-256."""
+    """Write the model's encoder to `out` (a .zip holding edgetam-encoder.mlpackage, EdgeTAM's licence and a
+    notice of what was changed); returns its SHA-256."""
     import coremltools as ct
 
     predictor = build_video_predictor("cpu", model)
@@ -48,6 +61,8 @@ def convert(model: str, out: Path) -> str:
                          minimum_deployment_target=ct.target.macOS15)
     with tempfile.TemporaryDirectory() as tmp:
         package.save(str(Path(tmp) / "edgetam-encoder.mlpackage"))
+        shutil.copy(edgetam_root() / "LICENSE", Path(tmp) / "LICENSE")
+        (Path(tmp) / "NOTICE").write_text(NOTICE)
         shutil.make_archive(str(out).removesuffix(".zip"), "zip", tmp)
     return hashlib.sha256(Path(out).read_bytes()).hexdigest()
 

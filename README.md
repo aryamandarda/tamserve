@@ -73,7 +73,7 @@ Four words come up a lot below:
 pip install tamserve
 ```
 
-You need Python 3.10 or newer and an NVIDIA GPU. It does run on a CPU, which is handy for trying it out but much too slow for live video. Tracking by name needs `pip install "tamserve[sam3]"` and Meta's SAM 3, as [described below](#following-what-you-name).
+You need Python 3.10 or newer and an NVIDIA GPU. An Apple-silicon Mac works too, at about a fifth of an RTX 4090's speed: [one or two live cameras](https://github.com/aryamandarda/tamserve/blob/main/docs/results.md#on-a-mac). It does run on a CPU, which is handy for trying it out but much too slow for live video. Tracking by name needs `pip install "tamserve[sam3]"` and Meta's SAM 3, as [described below](#following-what-you-name).
 
 The first time you load a model, tamserve downloads it into `~/.cache/tamserve`, so that run needs an internet connection. EdgeTAM is 54 MB. The download is pinned to one version and verified before any of it is loaded.
 
@@ -110,7 +110,7 @@ class Camera:
         return self.newest
 
 
-engine = Engine(build_video_predictor("cuda"))  # loads EdgeTAM onto the GPU
+engine = Engine(build_video_predictor("cuda"))  # loads EdgeTAM onto the GPU; "mps" on a Mac
 cameras = {"door": Camera("rtsp://door-camera/stream"), "yard": Camera("rtsp://yard-camera/stream")}
 
 # What to track and where it is in the first frame: a box as (left, top, right, bottom), in pixels.
@@ -278,6 +278,7 @@ SAM 3 can also track people through a video by itself. Here are the two side by 
 |---|---|
 | a different model | `build_video_predictor("cuda", "sam2.1-tiny")`. The same works with `-small`, `-base-plus` and `-large`. |
 | masks left on the GPU instead of copied to the CPU | `Engine(predictor, gpu_masks=True)` |
+| a Mac at its fastest | `engine.step(frames, next_frames=upcoming)`: hand over the next round's frames as well, when you already have them. A Mac's second processor starts on them while its GPU finishes this round, which takes one camera from 24 frames a second to 40 |
 | masks identical to stock's, bit for bit | `Engine(predictor, exact=True)`, and pass each frame through `prepare(frame)` first: it resizes on the CPU exactly as stock does, where the engine's own resize on the GPU can be off by 1 in a pixel's value |
 
 ### Compiling for speed
@@ -364,7 +365,7 @@ What to expect in practice:
 
 - **More objects cost more.** The speeds on this page are for one object per camera, and each extra object adds about 2.4 ms to a round.
 - **The first compiled start takes about 20 minutes.** After that it is about 95 seconds, as long as PyTorch's cache of compiled code is still there. `compile="default"` is ready in under 3 minutes.
-- **Other GPUs will give other numbers.** tamserve runs on any NVIDIA GPU that PyTorch supports, but every speed on this page comes from one RTX 4090. Older GPUs without hardware support for bf16, the number format the models run in, are far slower than their age suggests: on the T4 that Colab gives for free, one look by SAM 3 takes 3 seconds.
+- **Other GPUs will give other numbers.** tamserve runs on any NVIDIA GPU that PyTorch supports, but every speed on this page comes from one RTX 4090. Older GPUs without hardware support for bf16, the number format the models run in, are far slower than their age suggests: on the T4 that Colab gives for free, one look by SAM 3 takes 3 seconds. A Mac's GPU is full with one camera, so more cameras share the same 40 to 50 frames a second, and a look by SAM 3 takes 0.75 seconds there.
 
 ## Read more
 

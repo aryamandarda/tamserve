@@ -263,6 +263,41 @@ failing the step for every camera on the GPU. A worker whose steps fail three
 times in a row decides its GPU is broken and stops, rather than reporting the same
 error forever.
 
+## On a Mac
+
+An Apple-silicon Mac has three processors on one chip: the CPU, a GPU, and the
+Neural Engine, which is built only to run neural networks. PyTorch uses the GPU
+and leaves the Neural Engine idle.
+
+On an NVIDIA card one camera leaves the GPU waiting most of the time, and
+batching cameras fills it. A Mac's GPU is slower, and one camera already fills
+it: on an M4 Max each object costs 18 ms of GPU time a step, whether there is
+one or eight ([results.md](results.md#on-a-mac)). Batching buys nothing there.
+What a Mac has to spare is the Neural Engine.
+
+**The image encoder runs on the Neural Engine.** It is the one stage that needs
+only the frame, so it can run while the GPU does something else. It is the
+model's own encoder with the same weights, converted to Core ML, Apple's format
+and the only way onto the Neural Engine (`src/tamserve/apple/`). The Neural
+Engine works in 16-bit numbers, its features come out 2% different from
+PyTorch's, and that costs 0.002 of accuracy on DAVIS 2017.
+`Engine(predictor, neural_engine=False)` keeps everything on the GPU.
+
+**The encoder needs a head start.** Handed one frame at a time, the GPU waits
+for the Neural Engine and little is gained. So `step()` also takes the frames
+the next step will get, as `next_frames`, when the caller already has them: a
+recorded video, or a camera read one frame ahead. The Neural Engine starts on
+them while the GPU follows objects on the current frames, and one camera goes
+from 24 frames a second to 40. A next frame is recognised by its pixels when it
+comes back. If a different frame comes, that one is encoded and followed.
+
+**The other stages stay on the GPU.** Following an object is a chain: each stage
+needs the one before, and the next frame needs the last. A second processor
+could only help by running a stage as exactly as the GPU does, and the Neural
+Engine runs the memory encoder no faster than the GPU and 9% off.
+
+The GPU runs in 16-bit numbers on a Mac too (fp16 there, bf16 on NVIDIA).
+
 ## Following people
 
 The engine follows what it is pointed at. `PeopleTracker`
@@ -322,6 +357,24 @@ prompts, SAM 3 looks at the camera every `look_every` frames, 3 by default, and
 the engine follows what it outlined in between. People have their own class
 because their settings were tuned on people and score better there; `Tracker`
 is for everything else, and for people next to other things.
+
+**Off NVIDIA, SAM 3 comes through other code.** Meta's SAM 3 package names
+the NVIDIA device throughout and does not import on a Mac. Hugging Face's
+`transformers` has the same model with the same weights, and `Finder` uses it on
+an Apple GPU or a CPU. Called the way its documentation shows, it is not the
+same finder: on 152 questions it outlined 14 things that Meta's code scored
+under the threshold. Three differences were behind that, and `Finder` removes
+each one ([results.md](results.md#the-same-sam-3)):
+
+- Meta's code puts every prompt through its box encoder, even a prompt of words
+  alone, and the token that comes out joins the words. Hugging Face's skips the
+  step when there is no box. `Finder` gives it one box marked "ignore", which
+  makes it run.
+- The two resize a picture to SAM 3's 1,008 pixels differently. `Finder` resizes
+  as Meta's code does.
+- Meta's code enlarges a mask's scores to the frame and then cuts them into a
+  mask. Hugging Face's cuts after squashing them, which moves the edges.
+  `Finder` does it Meta's way.
 
 **The rules are SAM 3's own.** With SAM 3 looking at every single frame, a
 first version found more than SAM 3's video tracker did and was right half as
@@ -403,6 +456,9 @@ or that anyone can write to. The code is stored under the package name
   3 frames apart, so every step mixes new and old objects. Each is compared with
   stock tracking that video alone and with the hand-drawn masks
   (`bench/accuracy.py`).
+- **On a Mac.** The Neural Engine path against the plain engine, bit for bit,
+  with the model's own encoder standing in for the Neural Engine; and on the real
+  one, by how far the masks overlap (`tests/test_apple.py`, `bench/mac.py`).
 - **Speed against stock's best.** Stock compiled the way Meta's `vos_optimized`
   mode compiles SAM 2, one process per camera, sharing the GPU through NVIDIA
   MPS, counted exactly as the engine is (`bench/throughput.py`).

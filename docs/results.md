@@ -798,6 +798,114 @@ one.
 uv run python bench/people_load.py --data data/saco --compile --model sam2.1-large --cameras 16 --prompts 1 --minutes 20
 ```
 
+## On a Mac
+
+One machine: an M4 Max MacBook Pro (36 GB, macOS 26.4, PyTorch 2.15), with
+nothing else running. EdgeTAM, 16-bit numbers on the GPU. One 720p clip of
+three people in an office, with a box on a person to start each object. Why a
+Mac is served differently is in [how-it-works.md](how-it-works.md#on-a-mac).
+
+Frames a second in total across the cameras:
+
+| | EdgeTAM's own code | tamserve | tamserve, next frames given |
+|---|---|---|---|
+| 1 camera, 1 object | 18.5 | 24 | 40 |
+| 1 camera, 3 objects | 7.7 | 13 | 16 |
+| 4 cameras, 1 object each | | 30 | 48 |
+| 8 cameras, 1 object each | | 31 | 49 |
+
+- **EdgeTAM's own code** is its video predictor as its authors run it on a Mac:
+  32-bit, one video, loaded whole before it starts. In 16-bit it runs at 22.9
+  and 12.7. It held 2.9 GB of GPU memory for 150 frames.
+- **tamserve** is `engine.step(frames)`: the image encoder on the Neural Engine
+  and everything else on the GPU. With `neural_engine=False` the four rows are
+  22, 12, 24 and 23.
+- **Next frames given** is `engine.step(frames, next_frames=upcoming)`.
+- `Engine(predictor, compile="default")` adds 10 to 20% to the last column: 46,
+  19 and, at eight cameras, 57.
+- With eight cameras both processors are full, and anything else the Mac is
+  doing comes out of the frame rate. With a browser busy on the same machine,
+  eight cameras fell from 49 to between 31 and 41.
+
+```bash
+uv run python bench/mac.py speed                      # add --objects 3, --compile default
+```
+
+### Where a Mac's time goes
+
+| | |
+|---|---|
+| the GPU's best: one 4,096 x 4,096 matrix product in 16-bit | 11.7 TFLOPS (trillion additions or multiplications a second) |
+| what one object asks of it in one step | 105 billion of them, and 67 million attention weights through a softmax |
+| what one object takes | 18.2 ms: 5.8 TFLOPS, half the GPU's best |
+| a step with 1, 2, 4 and 8 objects, everything on the GPU | 46, 63, 99 and 174 ms |
+| the image encoder for one frame | 13 ms on the Neural Engine, 20 ms on the GPU through PyTorch |
+
+Every object costs the same 18 ms however many share a step, so the GPU is busy
+with arithmetic and batching has nothing to save. Running at half its best on a
+whole model, softmax and all, leaves little for other software to find: Apple's
+own framework, MLX, ran the attention 10% faster. With the Neural Engine
+encoding frames beside it, the GPU's 18 ms an object is the limit: 55 frames a
+second, of which the engine reaches 40 with one camera and 49 with eight.
+
+### Accuracy on a Mac
+
+DAVIS 2017 val, scored as [above](#the-engine-against-stock), from frames as a
+decoder gives them:
+
+| | accuracy |
+|---|---|
+| everything on the GPU (`neural_engine=False`) | 0.8684 |
+| image encoder on the Neural Engine | 0.8665 |
+| for scale, an RTX 4090 | 0.8684 |
+
+The Neural Engine's features differ from PyTorch's by 2% on average, and 19 of
+the 30 videos score lower with them. The largest drops are 0.018 and 0.010.
+
+```bash
+uv run python bench/mac.py accuracy                   # after scripts/fetch_davis.sh
+```
+
+### Anything you name, on a Mac
+
+`Tracker` on the same clip, its three people followed. A look by SAM 3 takes
+0.75 seconds with one prompt, against 65 ms on an RTX 4090, and nearly all of it
+is SAM 3's image encoder. So `look_every` decides the frame rate:
+
+| prompts | a look every | frames a second |
+|---|---|---|
+| person | 3 frames, the default | 3.0 |
+| person | 15 | 7.8 |
+| person | 30 | 9.7 |
+| person, laptop | 15 | 6.1 |
+
+A step without a look takes 70 ms with three people.
+
+### The same SAM 3
+
+Meta's SAM 3 package runs on NVIDIA only, so off NVIDIA `Finder` runs the same
+weights through Hugging Face's code
+([how-it-works.md](how-it-works.md#following-what-you-name)). 48 frames from
+twelve clips were shown to both, with 152 questions between them ("person",
+"cup", "forklift", and a giraffe that is in none): Meta's on an RTX 4090, and
+Hugging Face's on the Mac in 16-bit.
+
+| | as Hugging Face documents it | as `Finder` calls it |
+|---|---|---|
+| questions answered with the same number of outlines | 140 of 152 | 150 of 152 |
+| outlines only the Mac found | 14 | 1 |
+| outlines only the RTX 4090 found | 2 | 1 |
+| overlap of the outlines both found, mean | 0.960 | 0.998 |
+| the worst of them | 0.833 | 0.987 |
+| confidence, mean difference | 0.037 | 0.004 |
+| the largest | 0.308 | 0.031 |
+
+The two outlines still found on one side only are within 0.01 of the threshold
+on both. `Tracker` with each finder, on the same RTX 4090 and the same EdgeTAM,
+over 150 frames of three clips: the same number of objects on every frame, and
+masks that overlap by 0.997, 0.997 and 0.999. Two runs of Meta's own code that
+differ only in rounding (bf16 against fp16) overlap by 0.998, 0.998 and 0.999.
+
 ## Waiting inside a step
 
 How often the CPU stops until the GPU has finished everything queued, in one
@@ -855,19 +963,24 @@ its settings were chosen on:
 | a small model, taught by SAM 3 on each camera, to say when to look | it missed 6 of 32 new objects. A look whenever the picture changes sees 93% of them within 3 frames. |
 | a pruned copy of SAM 3's image encoder (DART, 16 of its 32 blocks) as the finder | 3 to 7 HOTA lower; the full encoder looking every 5th frame beats it looking every 3rd, at the same cost |
 | EfficientSAM3's small models as the finder | 17 to 30 HOTA lower, for a look 2.1 to 2.7 times cheaper |
+| on a Mac, MLX (Apple's own framework) in place of PyTorch for memory attention | 10% faster on that one operation in 16-bit, which is 6% of a step, for rewriting Meta's model code |
+| on a Mac, the memory encoder on the Neural Engine too | 5.6 ms an object against the GPU's 4.3 to 5.0, and 9% off PyTorch's result |
+| on a Mac, the model on smaller pictures (768 pixels a side, not its own 1,024) | 1.8 times the speed, and 0.016 of accuracy on DAVIS 2017 (0.8526) |
+| on a Mac, Meta's own SAM 3 package | it names the NVIDIA device in 52 places and does not import |
 
 ## Reproducing the numbers
 
 ```bash
 git clone https://github.com/aryamandarda/tamserve.git && cd tamserve
 uv sync --group dev --group bench
-uv run pytest                                   # 74 tests on a CPU, 82 with a GPU
+uv run pytest                                   # 84 tests on a CPU, 92 with an NVIDIA GPU, 87 on a Mac
 scripts/fetch_davis.sh                          # DAVIS 2017, 833 MB, for the accuracy benchmark
 
 uv run python bench/throughput.py --arms procs-compiled --procs 1,2,4,8                    # stock
 uv run python bench/throughput.py --arms engine-procs --procs 1 --sizes 1,2,4,8,16,32,64   # tamserve
 uv run python bench/accuracy.py --compile best     # add --model sam2.1-tiny and so on
 uv run python bench/memory.py
+uv run python bench/mac.py speed                # on an Apple-silicon Mac; and: bench/mac.py accuracy
 uv run python bench/engine_profile.py --stages
 uv run --with opencv-python-headless python bench/live.py --video your-video.mp4   # the live loop
 uv run --with opencv-python-headless python bench/router.py --video your-video.mp4 --gpus 0,1   # several GPUs

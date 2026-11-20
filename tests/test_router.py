@@ -1,6 +1,9 @@
 import functools
+import threading
 import time
+from multiprocessing import Pipe
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -8,6 +11,7 @@ import torch
 from PIL import Image
 
 from tamserve import Engine, Router, build_video_predictor
+from tamserve import worker as worker_module
 from tamserve.worker import encode
 from test_engine import RED, YELLOW, _alone, _assert_tracked_like, _disc_at, _run, _video
 
@@ -224,10 +228,31 @@ def test_moving_a_full_size_mask_does_not_lock_the_router(tmp_path):
 def test_a_burst_of_cameras_is_spread_even_when_one_worker_was_busy():
     # One worker last reported a camera's worth of work, the other nothing yet: eight
     # cameras added before the next report must still be split between them.
-    from types import SimpleNamespace
     router = Router.__new__(Router)
     router._workers = [SimpleNamespace(alive=True, remote=False, busy=0.0, counted=0, cameras=set()),
                        SimpleNamespace(alive=True, remote=False, busy=0.15, counted=1, cameras=set())]
     for camera in range(8):
         router._workers[router._place("rtsp://camera")].cameras.add(camera)
     assert [len(w.cameras) for w in router._workers] == [4, 4]
+
+
+def test_a_step_longer_than_the_silence_limit_does_not_end_the_session(monkeypatch):
+    # While a step runs, the router's signs of life wait unread. A worker must not take
+    # that for silence, and must still let go of a router that really stops sending them.
+    monkeypatch.setattr(worker_module, "_SILENCE", 0.5)
+    stepped, over = threading.Event(), threading.Event()
+    engine = SimpleNamespace(tracks={}, drop=lambda *a: None,
+                             step=lambda frames, seeds: time.sleep(1.6) or stepped.set() or {})
+    ours, router = Pipe()
+    worker = worker_module._Worker(engine, ours, keep=2)
+    frames = iter([np.zeros((8, 8, 3), np.uint8), None])
+    worker.add_camera("a", lambda: SimpleNamespace(read=lambda: next(frames)), True)
+    threading.Thread(target=lambda: (worker.run(ours), over.set()), daemon=True).start()
+    until = None
+    while until is None or time.monotonic() < until:  # the step, then two of the worker's one-second checks
+        router.send(("ping",))
+        time.sleep(0.1)
+        if until is None and stepped.is_set():
+            until = time.monotonic() + 2.2
+    assert not over.is_set()
+    assert over.wait(10)  # no more signs of life: now it is silence

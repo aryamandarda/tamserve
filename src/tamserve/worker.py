@@ -248,7 +248,7 @@ class _Worker:
         self.fresh = threading.Event()
         self.over = threading.Event()  # the session is over
         self.sending = threading.Lock()  # the loop and the heartbeat both send
-        self.heard = time.monotonic()
+        self.heard = self.looked = time.monotonic()  # when the router last spoke, and when the loop last listened
         self.since, self.spent, self.failures = time.perf_counter(), 0.0, 0
 
     def run(self, commands):
@@ -270,7 +270,8 @@ class _Worker:
         """Every second: tell the router how busy the GPU has been, and end the session
         if the router has said nothing for _SILENCE seconds."""
         while not self.over.wait(1.0):
-            if time.monotonic() - self.heard > _SILENCE:
+            # Counted up to the loop's last look, not to now: during a long step the router's words wait unread.
+            if self.looked - self.heard > _SILENCE:
                 log.warning("no word from the router for %.0f s; ending its session", _SILENCE)
                 self.over.set()
                 return
@@ -306,6 +307,7 @@ class _Worker:
                     getattr(self, name)(*args)
                 except Exception as e:
                     self._send([Update(args[0] if args else None, None, None, {}, error=f"{type(e).__name__}: {e}")])
+            self.looked = time.monotonic()
             self.fresh.clear()
             if not self._round():
                 self.fresh.wait(0.005)

@@ -157,10 +157,22 @@ class Engine:
         Seeding stays uncompiled. A compiled engine keeps PyTorch's float32 matmul
         setting (torch.set_float32_matmul_precision) as it was when it was built.
     gpu_masks: return masks on the GPU instead of copying them to the CPU.
+    neural_engine: on an Apple-silicon Mac, run the image encoder on the Neural Engine,
+        the processor built for neural networks that sits beside the GPU, so the two
+        work at once (tamserve.apple). False keeps everything on the GPU, as does
+        `exact`. It changes nothing on other machines.
     """
 
+    def __new__(cls, predictor, **options):
+        if (cls is Engine and predictor.device.type == "mps" and options.get("neural_engine", True)
+                and not options.get("exact")):
+            from tamserve import apple
+            if apple.usable(predictor):
+                return super().__new__(apple.AppleEngine)
+        return super().__new__(cls)
+
     def __init__(self, predictor, *, bf16: bool = True, exact: bool = False, compile: bool | str = False,
-                 gpu_masks: bool = False):
+                 gpu_masks: bool = False, neural_engine: bool = True):
         m = predictor
         # The memory layout below mirrors stock for this configuration only.
         if not (m.num_maskmem > 0 and m.use_obj_ptrs_in_encoder and m.memory_temporal_stride_for_eval == 1
@@ -307,7 +319,7 @@ class Engine:
         if not self.tracks:
             self._last = None  # free the cached features
 
-    def step(self, frames: dict, seeds: dict | None = None) -> dict:
+    def step(self, frames: dict, seeds: dict | None = None, *, soon: dict | None = None) -> dict:
         """One batched pass: every object on every camera here advances one frame.
 
         frames: camera id -> the frame as a decoder gives it (an H x W x 3 uint8
@@ -315,6 +327,10 @@ class Engine:
             prepare() output.
         seeds: camera id -> {object id: bool mask, Box or Clicks}: objects that
             start on this frame, or start again if they are already followed.
+        soon: the frames the next step() will be given, when they are already known
+            (a recorded video, or a camera read one frame ahead). On a Mac they are
+            encoded on the Neural Engine while the GPU works on this step's; the
+            masks returned are still this step's. Elsewhere it changes nothing.
         Returns camera id -> {object id: bool mask at the frame's own size}.
         """
         seeds = seeds or {}
@@ -422,15 +438,18 @@ class Engine:
                 return (*self._last[1:], cols)
         self._last = None  # free the previous step's features before making this one's
         self._use(True)
-        cap = len(images) if len(images) <= _ENCODE_WHOLE else _ENCODE_BATCH
-        parts = [self.model.forward_image(self._normalize(images[p])) for p in self._pieces(len(images), cap)]
-        backbone = parts[0] if len(parts) == 1 else _cat_backbone(parts)
-        _, feats, pos, sizes = self.model._prepare_backbone_features(backbone)
+        _, feats, pos, sizes = self.model._prepare_backbone_features(self._backbone(images))
         # Position encodings depend only on the frame size, so every frame's are the
         # same (_one_pos): keep one copy of the level memory attention reads.
         pos = pos[-1][:, :1].clone()
         self._last = ([(im, _version(im)) for im in images], feats, pos, sizes)
         return feats, pos, sizes, list(range(len(images)))
+
+    def _backbone(self, images):
+        """The image encoder's output for these frames."""
+        cap = len(images) if len(images) <= _ENCODE_WHOLE else _ENCODE_BATCH
+        parts = [self.model.forward_image(self._normalize(images[p])) for p in self._pieces(len(images), cap)]
+        return parts[0] if len(parts) == 1 else _cat_backbone(parts)
 
     def _rows(self, xs, keys, col):
         """Each object's camera's column of (tokens, frames, channels) features,

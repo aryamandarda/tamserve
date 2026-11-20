@@ -17,12 +17,19 @@ dependencies = [
     "iopath>=0.1.10",
     "pillow>=9.4.0",
     "timm>=1.0.17",  # EdgeTAM builds its backbone with it
+    # On an Apple-silicon Mac, the way to the Neural Engine (tamserve.apple). Nothing is installed elsewhere.
+    "pyobjc-framework-CoreML>=10; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.optional-dependencies]
 # Tracker and PeopleTracker find things with Meta's SAM 3: its own licence, and weights gated on Hugging Face.
-# SAM 3 imports psutil without declaring it.
-sam3 = ["sam3>=0.1.4", "psutil"]
+# Meta's package runs on Linux with an NVIDIA GPU only, and imports psutil without declaring it. Elsewhere
+# (a Mac, Windows) the same model comes through Hugging Face's implementation of it.
+sam3 = [
+    "sam3>=0.1.4; sys_platform == 'linux'",
+    "psutil; sys_platform == 'linux'",
+    "transformers>=5.12; sys_platform != 'linux'",
+]
 
 [project.urls]
 Repository = "https://github.com/aryamandarda/tamserve"

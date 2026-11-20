@@ -193,4 +193,5 @@ def build_video_predictor(device: str = "cuda", model: str = "edgetam"):
     OmegaConf.resolve(cfg)
     predictor = instantiate(cfg.model, _recursive_=True)
     predictor.load_state_dict(torch.load(checkpoint(model), map_location="cpu", weights_only=True)["model"])
+    predictor.tamserve_model = model  # which of MODELS this is
     return predictor.to(device).eval()

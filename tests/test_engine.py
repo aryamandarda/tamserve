@@ -93,6 +93,14 @@ def test_one_camera_equals_stock_on_gpu(model, tmp_path, monkeypatch):
     _assert_tracked_like(track(gpu, v[0], v[1]), got, objects=2, frames=20, exact=True)
 
 
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs an Apple GPU")
+def test_an_apple_gpu_tracks_in_16_bit_as_it_does_in_32(tmp_path):
+    mac = build_video_predictor(device="mps")
+    v = _video(tmp_path / "a", 96, 128, 20, [RED, YELLOW], seed=0)
+    (half,), (full,) = _run(Engine(mac), [v], [0]), _run(Engine(mac, bf16=False), [v], [0])
+    _assert_tracked_like(full, half, objects=2, frames=20)
+
+
 def test_one_camera_equals_stock(pred, tmp_path):
     # 20 frames: seed, memory filling up, then steady state past frame 16.
     v = _video(tmp_path / "a", 96, 128, 20, [RED, YELLOW], seed=0)

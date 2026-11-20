@@ -10,9 +10,12 @@ Masks = dict[int, dict[int, torch.Tensor]]  # frame_idx -> obj_id -> bool mask
 
 
 def precision(device: str, bf16: bool = True):
-    """bf16 autocast is how EdgeTAM normally runs on GPU; fp32 everywhere else."""
+    """16-bit numbers where the GPU has a fast format for them: bf16 on NVIDIA, which is how
+    EdgeTAM normally runs, and fp16 on Apple GPUs. fp32 everywhere else."""
     if bf16 and device == "cuda":
         return torch.autocast("cuda", dtype=torch.bfloat16)
+    if bf16 and device == "mps":
+        return torch.autocast("mps", dtype=torch.float16)
     return contextlib.nullcontext()
 
 

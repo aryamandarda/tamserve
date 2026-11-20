@@ -279,8 +279,78 @@ def test_a_camera_that_changes_resolution_starts_afresh(pred):
     assert list(out) == [1] and out[1].shape == (80, 112)
 
 
+class _Batch(dict):
+    """What the stand-in processor gives: a dict whose entries are attributes too, as transformers' is."""
+    __getattr__ = dict.__getitem__
+
+    def to(self, device):
+        return self
+
+
+def _stand_in_for_transformers(calls):
+    """A `transformers` with a SAM 3 that outlines discs by colour and counts what it is asked to encode."""
+    class Sam3Processor:
+        @classmethod
+        def from_pretrained(cls, name):
+            return cls()
+
+        def __call__(self, images=None, text=None, return_tensors=None):
+            if images is not None:
+                return _Batch(pixel_values=torch.from_numpy(np.asarray(images)))
+            return _Batch(input_ids=text, attention_mask=torch.ones(1))
+
+        def post_process_instance_segmentation(self, out, threshold, mask_threshold, target_sizes):
+            picture, colour = out
+            m = (picture.int() - torch.tensor(COLOURS[colour])).abs().sum(-1) < 60
+            assert list(m.shape) == target_sizes[0]
+            found = m.sum() > 20 and 0.9 >= threshold
+            return [{"masks": m[None] if found else m[:0], "scores": torch.full((int(found),), 0.9)}]
+
+    class Sam3Model:
+        dtype = torch.uint8
+
+        @classmethod
+        def from_pretrained(cls, name, torch_dtype=None):
+            return cls()
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+        def get_vision_features(self, pixel_values):
+            calls.append("picture")
+            return pixel_values
+
+        def get_text_features(self, input_ids, attention_mask):
+            calls.append(input_ids)
+            return input_ids
+
+        def __call__(self, vision_embeds, text_embeds, attention_mask):
+            return vision_embeds, text_embeds
+
+    module = type(sys)("transformers")
+    module.Sam3Model, module.Sam3Processor = Sam3Model, Sam3Processor
+    return module
+
+
+def test_without_an_nvidia_gpu_sam3_comes_through_hugging_face(pred, monkeypatch):
+    calls = []
+    monkeypatch.setitem(sys.modules, "transformers", _stand_in_for_transformers(calls))
+    tracker = Tracker(Engine(pred), ["red", "yellow"], look_every=2)  # the finder it makes itself, on the CPU
+    frames = _frames(96, 128, 6, TWO)
+    for f in frames:
+        out = tracker.step({"cam": f})["cam"]
+        assert sorted(tracker.names("cam").values()) == ["red", "yellow"]
+        assert all(np.abs(_colour_of(f, out[i]) - COLOURS[name]).max() < 40 for i, name in tracker.names("cam").items())
+    # A picture is encoded once for both prompts, and each prompt's words once for good.
+    assert calls.count("picture") == 3 and calls.count("red") == calls.count("yellow") == 1
+
+
 def test_without_sam3_a_tracker_says_how_to_install_it(pred, monkeypatch):
-    monkeypatch.setitem(sys.modules, "sam3", None)  # as where SAM 3 is not installed
+    monkeypatch.setitem(sys.modules, "sam3", None)  # as where SAM 3 is not installed, in either form
+    monkeypatch.setitem(sys.modules, "transformers", None)
     with pytest.raises(ModuleNotFoundError, match=r'pip install "tamserve\[sam3\]"'):
         Tracker(Engine(pred), "red")
 

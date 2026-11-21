@@ -283,13 +283,25 @@ Engine works in 16-bit numbers, its features come out 2% different from
 PyTorch's, and that costs 0.002 of accuracy on DAVIS 2017.
 `Engine(predictor, neural_engine=False)` keeps everything on the GPU.
 
-**The encoder needs a head start.** Handed one frame at a time, the GPU waits
-for the Neural Engine and little is gained. So `step()` also takes the frames
-the next step will get, as `next_frames`, when the caller already has them: a
-recorded video, or a camera read one frame ahead. The Neural Engine starts on
-them while the GPU follows objects on the current frames, and one camera goes
-from 24 frames a second to 40. A next frame is recognised by its pixels when it
-comes back. If a different frame comes, that one is encoded and followed.
+**The encoder needs a head start.** Handed one frame at a time, the two
+processors take turns and little is gained. They work at once only if the
+Neural Engine has a frame while the GPU is still following objects on the one
+before.
+
+A live camera gives it that by itself: its next frame arrives on the camera's
+clock, usually before the GPU is done. So the engine can be told of a frame the
+moment it arrives, from the thread that reads the camera (`start_encoding()`),
+and a Router's workers do. One camera at 30 frames a second then has every
+frame tracked, against 24 of them, with its masks sooner. When tracking is
+behind its cameras, a worker takes each camera's newest frame that is already
+encoded, not the very newest, so the GPU does not wait for the Neural Engine.
+A frame that is passed over before its turn is never encoded.
+
+A recorded video has no clock, but its next frame is already there, so `step()`
+takes it as `next_frames`, and one camera goes from 24 frames a second to 40.
+
+Either way, a frame given early is recognised by its pixels when it comes back.
+If a different frame comes, that one is encoded and followed.
 
 **The other stages stay on the GPU.** Following an object is a chain: each stage
 needs the one before, and the next frame needs the last. A second processor

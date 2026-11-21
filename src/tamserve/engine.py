@@ -327,16 +327,30 @@ class Engine:
             prepare() output.
         seeds: camera id -> {object id: bool mask, Box or Clicks}: objects that
             start on this frame, or start again if they are already followed.
-        next_frames: camera id -> the frame the next step() will be given, for the
-            cameras where you already have it (a recorded video, or a camera read
-            one frame ahead). On a Mac the Neural Engine starts on those frames now,
-            while the GPU finishes this step, which is most of a Mac's speed. The
-            masks returned are still this step's. Elsewhere it changes nothing.
+        next_frames: camera id -> the frame the next step() will be given, where
+            you already have it, as with a recorded video. On a Mac the Neural
+            Engine starts on those frames now, while the GPU finishes this step,
+            which is most of a Mac's speed. The masks returned are still this
+            step's. Elsewhere it changes nothing. A live camera has no next frame
+            yet: see start_encoding().
         Returns camera id -> {object id: bool mask at the frame's own size}.
         """
         seeds = seeds or {}
         new = {(c, o) for c in seeds for o in seeds[c]}
         return self._run(frames, seeds, [k for k in self.tracks if k[0] in frames and k not in new], frames, False)
+
+    def start_encoding(self, frames: dict) -> dict:
+        """For live cameras on a Mac. Call it with camera id -> frame the moment frames
+        arrive, from the thread that reads the camera, and give step() the same
+        frames when it is their turn. The Neural Engine starts on them at once, while
+        the GPU is still busy with the frames before. A frame that step() never gets
+        costs nothing but its encoding.
+
+        Returns camera id -> a function that says whether that frame is encoded yet,
+        for the cameras with something followed. A loop that has fallen behind its
+        cameras can step the newest frame that is, and the GPU never waits. Elsewhere
+        this does nothing and returns {}. A Router's workers do all of it themselves."""
+        return {}
 
     def add(self, frames: dict, seeds: dict) -> dict:
         """Start objects (or start them again) on frames step() has already been

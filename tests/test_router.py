@@ -241,7 +241,7 @@ def test_a_step_longer_than_the_silence_limit_does_not_end_the_session(monkeypat
     # that for silence, and must still let go of a router that really stops sending them.
     monkeypatch.setattr(worker_module, "_SILENCE", 0.5)
     stepped, over = threading.Event(), threading.Event()
-    engine = SimpleNamespace(tracks={}, drop=lambda *a: None,
+    engine = SimpleNamespace(tracks={}, drop=lambda *a: None, start_encoding=lambda frames: {},
                              step=lambda frames, seeds: time.sleep(1.6) or stepped.set() or {})
     ours, router = Pipe()
     worker = worker_module._Worker(engine, ours, keep=2)
@@ -256,3 +256,24 @@ def test_a_step_longer_than_the_silence_limit_does_not_end_the_session(monkeypat
             until = time.monotonic() + 2.2
     assert not over.is_set()
     assert over.wait(10)  # no more signs of life: now it is silence
+
+
+def test_a_worker_tells_its_engine_of_each_frame_as_it_arrives():
+    # On a Mac that is when the frame's encoding starts (Engine.start_encoding), ahead of the step for it.
+    seen = []
+    engine = SimpleNamespace(tracks={}, drop=lambda *a: None,
+                             start_encoding=lambda frames: seen.append(("arrived", int(frames["a"][0, 0, 0]))) or {},
+                             step=lambda frames, seeds: seen.append(("step", int(frames["a"][0, 0, 0]))) or {})
+    ours, router = Pipe()
+    worker = worker_module._Worker(engine, ours, keep=2)
+    frames = iter([np.full((8, 8, 3), k, np.uint8) for k in range(3)] + [None])
+    worker.add_camera("a", lambda: SimpleNamespace(read=lambda: next(frames)), False)  # False: every frame is tracked
+    threading.Thread(target=worker.run, args=(ours,), daemon=True).start()
+    ended = False
+    while not ended:
+        assert router.poll(10), seen
+        kind, *rest = router.recv()
+        ended = kind == "updates" and any(u.ended for u in rest[0])
+    router.send(("close",))
+    assert [k for what, k in seen if what == "arrived"] == [0, 1, 2]
+    assert all(seen.index(("arrived", k)) < seen.index(("step", k)) for k in range(3))

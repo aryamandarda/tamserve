@@ -3,11 +3,15 @@
   speed      frames per second with everything on the GPU, with the image encoder on the Neural
              Engine, and with each round's next frames given a round early (step's next_frames).
              Made-up 720p frames with moving discs: cost depends on shapes, not pixels.
+  live       cameras that send frames on a clock, as live ones do, through a Router: frames tracked
+             a second and how long after a frame arrived its masks came, on the GPU alone and
+             with the Neural Engine, which starts on each frame as it arrives.
   accuracy   DAVIS 2017 val scored as bench/accuracy.py scores it (every video a camera, joining
              three steps apart, against the hand-drawn masks), from frames as a decoder gives
              them, on the GPU alone and with the Neural Engine.
 """
 import argparse
+import functools
 import json
 import os
 import time
@@ -20,7 +24,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from tamserve import Box, Engine, build_video_predictor
+from tamserve import Box, Engine, Router, build_video_predictor
 from tamserve.compare import compare
 
 
@@ -59,6 +63,47 @@ def speed(args):
         print(json.dumps(row), flush=True)
 
 
+class Paced:
+    """A camera a Router's worker reads: made-up frames on a clock, the discs drifting right and back for ever."""
+
+    def __init__(self, objects, fps, seconds):
+        self.frames, _ = discs(45, objects)
+        self.fps, self.left, self.k, self.t0 = fps, int(fps * seconds), 0, None
+
+    def read(self):
+        if self.k == self.left:
+            return None
+        self.t0 = self.t0 or time.perf_counter()
+        wait = self.t0 + self.k / self.fps - time.perf_counter()
+        if wait > 0:
+            time.sleep(wait)
+        at = self.k % 88  # 0 to 44 and back
+        self.k += 1
+        return self.frames[min(at, 88 - at)].copy()
+
+
+def live(args):
+    _, boxes = discs(1, args.objects)
+    for cameras in args.cameras:
+        row = {"cameras": cameras, "objects": args.objects, "camera_frames_per_s": args.fps}
+        for name, neural in (("gpu", False), ("neural_engine", True)):
+            with Router(neural_engine=neural) as router:
+                for c in range(cameras):
+                    router.add_camera(c, functools.partial(Paced, args.objects, args.fps, args.seconds))
+                    for obj, box in boxes.items():
+                        router.start(c, obj, box)
+                got, ended = [], 0
+                for u in router.results(timeout=120):
+                    if u.masks and u.frame >= args.fps * args.seconds / 3:  # the first third is warm-up
+                        got.append((time.time(), time.time() - u.time))
+                    ended += bool(u.ended)
+                    if ended == cameras:
+                        break
+            row[name + "_frames_per_s"] = round((len(got) - 1) / (got[-1][0] - got[0][0]), 1)
+            row[name + "_ms_after_arrival"] = round(float(np.median([late for _, late in got])) * 1e3)
+        print(json.dumps(row), flush=True)
+
+
 def accuracy(args):
     root = Path(args.davis)
     seqs = davis.names(root, "val")
@@ -88,7 +133,12 @@ if __name__ == "__main__":
     s.add_argument("--objects", type=int, default=1, help="objects on each camera")
     s.add_argument("--frames", type=int, default=120)
     s.add_argument("--compile", default=None, help='a torch.compile mode: "default" works on a Mac')
+    v = sub.add_parser("live")
+    v.add_argument("--cameras", type=lambda v: [int(x) for x in v.split(",")], default=[1, 2, 4])
+    v.add_argument("--objects", type=int, default=1, help="objects on each camera")
+    v.add_argument("--fps", type=int, default=30, help="frames a second each camera sends")
+    v.add_argument("--seconds", type=float, default=10)
     a = sub.add_parser("accuracy")
     a.add_argument("--davis", default="data/davis/DAVIS")
     args = ap.parse_args()
-    {"speed": speed, "accuracy": accuracy}[args.what](args)
+    {"speed": speed, "live": live, "accuracy": accuracy}[args.what](args)

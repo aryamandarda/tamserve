@@ -278,7 +278,7 @@ SAM 3 can also track people through a video by itself. Here are the two side by 
 |---|---|
 | a different model | `build_video_predictor("cuda", "sam2.1-tiny")`. The same works with `-small`, `-base-plus` and `-large`. |
 | masks left on the GPU instead of copied to the CPU | `Engine(predictor, gpu_masks=True)` |
-| a Mac at its fastest | `engine.step(frames, next_frames=upcoming)`: hand over the next round's frames as well, when you already have them. A Mac's second processor starts on them while its GPU finishes this round, which takes one camera from 24 frames a second to 40 |
+| a Mac at its fastest | A Mac's second processor has to start on a frame while its GPU is still busy with the one before. With live cameras, call `engine.start_encoding({camera: frame})` from the thread that reads each camera, the moment a frame arrives; a `Router` does this by itself. A camera at 30 frames a second then has every frame followed, where 24 were. With a recorded video, hand over the next round's frames as well, `engine.step(frames, next_frames=upcoming)`, and it runs at 40 frames a second |
 | masks identical to stock's, bit for bit | `Engine(predictor, exact=True)`, and pass each frame through `prepare(frame)` first: it resizes on the CPU exactly as stock does, where the engine's own resize on the GPU can be off by 1 in a pixel's value |
 
 ### Compiling for speed

@@ -126,15 +126,16 @@ class _Camera:
     file, or a reader that returns None, has ended. What happens is queued in
     `statuses` for the loop to report."""
 
-    def __init__(self, name, source, keep, skip, retry_for, fresh):
+    def __init__(self, name, source, keep, skip, retry_for, fresh, arrived):
         self.name = name
         self.frames = deque(maxlen=keep)  # (number, time, frame), oldest first
         self.taken = -1                   # the newest frame number the loop has taken
+        self.encoded: dict = {}           # on a Mac, frame number -> says whether the engine has encoded it yet
         self.count = 0                    # frames read so far
         self.ended = self.reported = self.stopped = False
         self.error = None
         self.statuses: deque = deque()    # (status, why) for the loop to send
-        self.skip, self.retry_for, self.fresh = skip, retry_for, fresh
+        self.skip, self.retry_for, self.fresh, self.arrived = skip, retry_for, fresh, arrived
         self.retries = callable(source) or (isinstance(source, str) and source.lower().startswith(_NETWORK))
         self.lock = threading.Condition()
         threading.Thread(target=self._run, args=(source,), daemon=True).start()
@@ -176,10 +177,13 @@ class _Camera:
 
     def _add(self, frame):
         t = time.time()
+        encoded = self.arrived({self.name: frame}).get(self.name)  # on a Mac its encoding starts now (start_encoding)
         with self.lock:
             while not (self.skip or self.stopped or self.taken == self.count - 1):
                 self.lock.wait()  # every frame is wanted: wait until the loop has the last one
             self.frames.append((self.count, t, frame))
+            if encoded is not None:
+                self.encoded[self.count] = encoded
             self.count += 1
         self.fresh.set()
 
@@ -203,12 +207,15 @@ class _Camera:
             return out
 
     def newest(self):
-        """The newest frame the loop has not taken yet, now taken; None if there is none."""
+        """The newest frame the loop has not taken yet, now taken; None if there is none.
+        On a Mac, the newest of those that is already encoded, if any is: the GPU then does not wait."""
         with self.lock:
             if not self.frames or self.frames[-1][0] <= self.taken:
                 return None
-            item = self.frames[-1]
+            ready = [f for f in self.frames if f[0] > self.taken and f[0] in self.encoded and self.encoded[f[0]]()]
+            item = ready[-1] if ready else self.frames[-1]
             self.taken = item[0]
+            self.encoded = {n: e for n, e in self.encoded.items() if n > item[0]}
             self.lock.notify_all()
             return item
 
@@ -318,7 +325,8 @@ class _Worker:
     def add_camera(self, camera, source, skip, retry_for=None):
         if camera in self.cameras:
             self.remove_camera(camera)
-        self.cameras[camera] = _Camera(camera, source, self.keep, skip, retry_for, self.fresh)
+        self.cameras[camera] = _Camera(camera, source, self.keep, skip, retry_for, self.fresh,
+                                       self.engine.start_encoding)
         self.waiting[camera] = {}
 
     def remove_camera(self, camera):

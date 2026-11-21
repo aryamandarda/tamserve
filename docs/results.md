@@ -834,6 +834,31 @@ Frames a second in total across the cameras:
 uv run python bench/mac.py speed                      # add --objects 3, --compile default
 ```
 
+### Live cameras on a Mac
+
+The table above feeds frames as fast as they are tracked. Here each camera sends
+30 frames a second on a clock, as a live one does, and a `Router` reads them:
+one object on each, made-up 720p frames. A frame's encoding starts on the Neural
+Engine when it arrives.
+
+| | everything on the GPU | with the Neural Engine |
+|---|---|---|
+| 1 camera | 22 frames tracked a second, masks 64 ms after the frame arrived | 30, every frame, 44 ms |
+| 2 cameras | 23 in total, 102 ms | 45, 84 ms |
+| 4 cameras | 24, 189 ms | 45, 143 ms |
+| 8 cameras | 24, 369 ms | 42, 270 ms |
+| 1 camera, 3 objects | 12, 96 ms | 16, 96 ms |
+
+The same Router with the engine encoding each frame only when it was stepped
+tracked 24, 28 and 29 frames a second with one, two and four cameras, 59, 90
+and 157 ms after they arrived. Other programs drawing on the screen take GPU
+time from this: on repeats with an editor busy, two cameras gave 37 to 45 and
+four gave 29 to 45.
+
+```bash
+uv run python bench/mac.py live                       # add --cameras 8, --objects 3
+```
+
 ### Where a Mac's time goes
 
 | | |
@@ -969,6 +994,7 @@ its settings were chosen on:
 | on a Mac, MLX (Apple's own framework) in place of PyTorch for memory attention | 10% faster on that one operation in 16-bit, which is 6% of a step, for rewriting Meta's model code |
 | on a Mac, the memory encoder on the Neural Engine too | 5.6 ms an object against the GPU's 4.3 to 5.0, and 9% off PyTorch's result |
 | on a Mac, the model on smaller pictures (768 pixels a side, not its own 1,024) | 1.8 times the speed, and 0.016 of accuracy on DAVIS 2017 (0.8526) |
+| on a Mac, a live worker taking each camera's very newest frame, encoded yet or not | 30 frames a second in total with two cameras against 45: every round the GPU waited for a frame that had just arrived |
 | on a Mac, Meta's own SAM 3 package | it names the NVIDIA device in 52 places and does not import |
 
 ## Reproducing the numbers
@@ -976,7 +1002,7 @@ its settings were chosen on:
 ```bash
 git clone https://github.com/aryamandarda/tamserve.git && cd tamserve
 uv sync --group dev --group bench
-uv run pytest                                   # 84 tests on a CPU, 92 with an NVIDIA GPU, 87 on a Mac
+uv run pytest                                   # 89 tests on a CPU, 97 with an NVIDIA GPU, 92 on a Mac
 scripts/fetch_davis.sh                          # DAVIS 2017, 833 MB, for the accuracy benchmark
 
 uv run python bench/throughput.py --arms procs-compiled --procs 1,2,4,8                    # stock

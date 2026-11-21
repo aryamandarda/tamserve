@@ -281,7 +281,8 @@ model's own encoder with the same weights, converted to Core ML, Apple's format
 and the only way onto the Neural Engine (`src/tamserve/apple/`). The Neural
 Engine works in 16-bit numbers, its features come out 2% different from
 PyTorch's, and that costs 0.002 of accuracy on DAVIS 2017.
-`Engine(predictor, neural_engine=False)` keeps everything on the GPU.
+`Engine(predictor, neural_engine=False)` keeps everything on the GPU, and so does
+a macOS older than 15, which cannot load the encoder.
 
 **The encoder needs a head start.** Handed one frame at a time, the two
 processors take turns and little is gained. They work at once only if the

@@ -73,7 +73,9 @@ Four words come up a lot below:
 pip install tamserve
 ```
 
-You need Python 3.10 or newer and an NVIDIA GPU. An Apple-silicon Mac works too, at about a fifth of an RTX 4090's speed: [one or two live cameras](https://github.com/aryamandarda/tamserve/blob/main/docs/results.md#on-a-mac). It does run on a CPU, which is handy for trying it out but much too slow for live video. Tracking by name needs `pip install "tamserve[sam3]"` and Meta's SAM 3, as [described below](#following-what-you-name).
+You need Python 3.10 or newer and an NVIDIA GPU. An Apple-silicon Mac works too, about twice as fast as the models' own code there, with live cameras and tracking by name: [the numbers](https://github.com/aryamandarda/tamserve/blob/main/docs/results.md#on-a-mac). It does run on a CPU, which is handy for trying it out but much too slow for live video. Tracking by name needs `pip install "tamserve[sam3]"` and Meta's SAM 3, as [described below](#following-what-you-name).
+
+<sub>On a Mac: an M1 or later, on macOS 15 or newer. Measured on an M4 Max; speeds on other chips will differ.</sub>
 
 The first time you load a model, tamserve downloads it into `~/.cache/tamserve`, so that run needs an internet connection. EdgeTAM is 54 MB. The download is pinned to one version and verified before any of it is loaded.
 

@@ -223,6 +223,8 @@ class Router:
                  keep: int = 32, **options):
         if workers == "local":
             workers = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+            if not workers and torch.backends.mps.is_available():
+                workers = ["mps"]  # a Mac's GPU
             if not workers:
                 raise ValueError("no GPU is visible; pass workers=['cpu'] to run on the CPU")
         local = [w for w in workers if w.partition(":")[0] in ("cpu", "cuda", "mps")]

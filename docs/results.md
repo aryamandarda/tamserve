@@ -801,9 +801,11 @@ uv run python bench/people_load.py --data data/saco --compile --model sam2.1-lar
 ## On a Mac
 
 One machine: an M4 Max MacBook Pro (36 GB, macOS 26.4, PyTorch 2.15), with
-nothing else running. EdgeTAM, 16-bit numbers on the GPU. One 720p clip of
-three people in an office, with a box on a person to start each object. Why a
-Mac is served differently is in [how-it-works.md](how-it-works.md#on-a-mac).
+nothing else running. EdgeTAM, 16-bit numbers on the GPU, 720p frames, a box to
+start each object. EdgeTAM's own code was timed on a clip of three people in an
+office and tamserve on made-up frames of moving discs, which run at the clip's
+speed. Why a Mac is served differently is in
+[how-it-works.md](how-it-works.md#on-a-mac).
 
 Frames a second in total across the cameras:
 
@@ -821,8 +823,9 @@ Frames a second in total across the cameras:
   and everything else on the GPU. With `neural_engine=False` the four rows are
   22, 12, 24 and 23.
 - **Next frames given** is `engine.step(frames, next_frames=upcoming)`.
-- `Engine(predictor, compile="default")` adds 10 to 20% to the last column: 46,
-  19 and, at eight cameras, 57.
+- `Engine(predictor, compile="default")` takes the last column's first two rows
+  to 48 and 18. At eight cameras, where both processors are already full, it
+  adds nothing that shows: 49.
 - With eight cameras both processors are full, and anything else the Mac is
   doing comes out of the frame rate. With a browser busy on the same machine,
   eight cameras fell from 49 to between 31 and 41.
@@ -874,12 +877,12 @@ is SAM 3's image encoder. So `look_every` decides the frame rate:
 
 | prompts | a look every | frames a second |
 |---|---|---|
-| person | 3 frames, the default | 3.0 |
-| person | 15 | 7.8 |
-| person | 30 | 9.7 |
-| person, laptop | 15 | 6.1 |
+| person | 3 frames, the default | 3.1 |
+| person | 15 | 8.0 |
+| person | 30 | 9.8 |
+| person, laptop | 15 | 6.7 |
 
-A step without a look takes 70 ms with three people.
+A step without a look takes 70 to 78 ms with three people.
 
 ### The same SAM 3
 
